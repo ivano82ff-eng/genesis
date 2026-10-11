@@ -3,8 +3,8 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /** Grid Store limits (kernel/fs_limits.h). */
-const FS_NAME = 16;
-const FS_DATA = 65536;
+const FS_NAME = 32; // one path component (kernel FS_PART)
+const FS_DATA = 1024 * 1024;
 
 export interface PackageManifest {
   name: string;

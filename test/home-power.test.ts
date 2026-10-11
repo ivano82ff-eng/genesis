@@ -23,7 +23,7 @@ test(
 
     const off = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await off.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await off.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(off, "desktop");
       await off.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await click(off, 200, 640);
@@ -35,7 +35,7 @@ test(
 
     const again = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await again.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await again.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(again, "desktop");
       await again.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       assert.equal(countOf(again.serial, BOOT_MARKER), 1);

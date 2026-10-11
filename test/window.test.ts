@@ -21,12 +21,13 @@ test(
     const image = await buildImage();
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await click(guest, 200, 220);
       await guest.waitForSerial("ls: ", DEFAULT_TIMEOUT_MS);
-      await click(guest, 200, 148);
+      // /home: row 0 is "..", row 1 is readme.
+      await click(guest, 200, 208);
       await guest.waitForSerial("txt: welcome to genesis", DEFAULT_TIMEOUT_MS);
       const homes = countOf(guest.serial, "home: ready");
       await click(guest, 80, 40);

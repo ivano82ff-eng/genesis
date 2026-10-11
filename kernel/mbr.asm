@@ -30,8 +30,10 @@ DRIVE_BYTE equ 0x1ac
     mov [dap + 6], di
     mov [dap + 8], eax
     mov dl, [0x7c00 + DRIVE_BYTE]
+    push eax                ; AH below would clobber bits 8-15 of the LBA
     mov ah, 0x42
     int 0x13
+    pop eax
     jc fail
     add di, 0x20
     inc eax

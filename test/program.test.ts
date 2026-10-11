@@ -22,7 +22,7 @@ test(
     const image = await buildImage();
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       assert.match(guest.serial, new RegExp(BOOT_MARKER));
       await typeLine(guest, "run hello");
       await guest.waitForSerial("hello from program", DEFAULT_TIMEOUT_MS);

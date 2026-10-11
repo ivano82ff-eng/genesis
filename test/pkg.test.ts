@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { startGuest } from "../src/guest.js";
+import { importFiles } from "../src/import.js";
 import {
   DEFAULT_TIMEOUT_MS,
   buildImage,
@@ -24,11 +28,11 @@ test(
       const from = guest.serial.length;
       await typeLine(guest, command);
       await guest.waitForSerial(expect, DEFAULT_TIMEOUT_MS);
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       return guest.serial.slice(from);
     };
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       const list = await after("pkg list", "pkg: strlib 1.0 deps mathlib");
       assert.match(list, /pkg: mathlib 1\.0 - integer math/);
       assert.match(list, /pkg: strdemo 1\.0 deps strlib/);
@@ -51,7 +55,7 @@ test(
       await after("pkg remove strlib", "pkg: strlib needed by strdemo");
 
       // A library vanishing under a program fails cleanly instead of crashing.
-      await after("rm strlib", "rm: strlib");
+      await after("rm /lib/strlib", "rm: /lib/strlib");
       await after("run strdemo", "strdemo: missing library strlib");
       await after("pkg install strlib", "pkg: installed strlib 1.0");
       await after("run strdemo", "strdemo: 2^10=1024");
@@ -74,19 +78,23 @@ test(
   { timeout: 150_000 },
   async () => {
     const image = await buildImage();
-    const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
+    const dir = await mkdtemp(path.join(os.tmpdir(), "genesis-pkgfull-"));
+    const disk = path.join(dir, "disk.img");
+    // 256 catalog slots: 19 built-ins (4 folders + 15 files) + 235 imports + 1 write leave 1 free.
+    const fill = Array.from({ length: 235 }, (_, i) => ({ name: `fill${i}`, data: Buffer.from("x") }));
+    assert.equal((await importFiles(disk, fill)).imported.length, 235);
+    const guest = await startGuest({ isoPath: image.isoPath, display: "none", diskPath: disk, boot: "cd" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
-      for (let i = 0; i < 4; i++) {
-        await typeLine(guest, `write fill${i} x`);
-        await guest.waitForSerial(`write: fill${i}`, DEFAULT_TIMEOUT_MS);
-      }
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
+      await typeLine(guest, "write last x");
+      await guest.waitForSerial("write: last", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "pkg install strdemo");
       await guest.waitForSerial("pkg: need 3 free file slots, have 1", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "pkg installed");
       await guest.waitForSerial("pkg: installed: none", DEFAULT_TIMEOUT_MS);
     } finally {
       await guest.stop();
+      await rm(dir, { recursive: true, force: true });
     }
   },
 );

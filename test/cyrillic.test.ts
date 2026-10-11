@@ -28,7 +28,7 @@ test("Russian: layout switch, shell echo, screen glyphs, files, editor", { timeo
   const image = await buildImage();
   const guest = await startGuest({ isoPath: image.isoPath, display: "none", diskPath: disk });
   try {
-    await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+    await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
 
     // Ctrl+Space switches to ЙЦУКЕН; echo comes back as UTF-8 on COM1.
     await typeLine(guest, "echo Привет мир");

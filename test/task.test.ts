@@ -21,7 +21,7 @@ test(
     const image = await buildImage();
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "spawn ticker");
       await guest.waitForSerial("spawn: task 1", DEFAULT_TIMEOUT_MS);
       await guest.waitForSerial("tick", DEFAULT_TIMEOUT_MS);
@@ -38,7 +38,7 @@ test(
       const before = guest.serial.length;
       await typeLine(guest, "ps");
       await guest.waitForSerial("ps: 0 shell", DEFAULT_TIMEOUT_MS);
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       assert.ok(!guest.serial.slice(before).includes("ticker"));
     } finally {
       await guest.stop();

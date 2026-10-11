@@ -23,7 +23,7 @@ test(
 
     const memory = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await memory.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await memory.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(memory, "desktop");
       await memory.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       assert.match(memory.serial, /Память/);
@@ -55,14 +55,15 @@ test(
 
     const files = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await files.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await files.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(files, "desktop");
       await files.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await click(files, 200, 220);
       await files.waitForSerial("ls: ", DEFAULT_TIMEOUT_MS);
       assert.match(files.serial, /readme/);
       assert.match(files.serial, /Назад/);
-      await click(files, 200, 148);
+      // /home: row 0 is "..", row 1 is readme.
+      await click(files, 200, 208);
       await files.waitForSerial("txt: welcome to genesis", DEFAULT_TIMEOUT_MS);
     } finally {
       await files.stop();
@@ -70,7 +71,7 @@ test(
 
     const editor = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await editor.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await editor.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(editor, "desktop");
       await editor.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await click(editor, 200, 320);

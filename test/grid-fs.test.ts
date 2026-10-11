@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { startGuest } from "../src/guest.js";
+import { importFiles } from "../src/import.js";
 import {
   BOOT_MARKER,
   DEFAULT_TIMEOUT_MS,
@@ -33,7 +34,7 @@ test(
       boot: "cd",
     });
     try {
-      await first.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await first.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "write alpha grid-alpha");
       await first.waitForSerial("write: alpha", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "cat alpha");
@@ -53,7 +54,7 @@ test(
     });
     try {
       await second.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
-      await second.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await second.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat alpha");
       await second.waitForSerial("cat: no such file", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat readme");
@@ -75,10 +76,13 @@ test(
 
     const disk = path.join(os.tmpdir(), `grid-reuse-${process.pid}-${Date.now()}.img`);
     await writeFile(disk, Buffer.alloc(8 * 1024 * 1024));
+    // 256 catalog slots: 19 built-ins + 232 imports leave five for the writes below.
+    const pad = Array.from({ length: 232 }, (_, i) => ({ name: `pad${i}`, data: Buffer.from("p") }));
+    assert.equal((await importFiles(disk, pad)).imported.length, 232);
     const image = await buildImage();
 
     const fill = async (guest: Awaited<ReturnType<typeof startGuest>>): Promise<void> => {
-      // Seeding takes 15 of 20 catalog slots, so five writes fill the rest.
+      // Five writes fill the catalog.
       for (const [name, text] of [
         ["f1", "a1"],
         ["f2", "a2"],
@@ -110,7 +114,7 @@ test(
       boot: "cd",
     });
     try {
-      await first.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await first.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await fill(first);
     } finally {
       await first.stop();
@@ -123,7 +127,7 @@ test(
     });
     try {
       await second.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
-      await second.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await second.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       const expect = async (command: string, answer: string): Promise<void> => {
         await typeLine(second, command);
         await second.waitForSerial(answer, DEFAULT_TIMEOUT_MS);

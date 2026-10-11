@@ -12,6 +12,13 @@ import { click, delay, typeLine } from "./helpers.js";
 async function openRow(guest: Guest, rowY: number, expect: string): Promise<void> {
   await click(guest, 200, 420);
   await guest.waitForSerial("open: ", DEFAULT_TIMEOUT_MS);
+  // Samples live in /docs: «..» (row 0) to /, then docs (bin, lib, docs, home: row 2).
+  await delay(100);
+  await click(guest, 200, 148);
+  await guest.waitForSerial("dir: / ls: bin/ lib/ docs/ home/", DEFAULT_TIMEOUT_MS);
+  await delay(100);
+  await click(guest, 200, 268);
+  await guest.waitForSerial("dir: /docs ls: note.txt", DEFAULT_TIMEOUT_MS);
   await delay(100);
   await click(guest, 200, rowY);
   await guest.waitForSerial(expect, DEFAULT_TIMEOUT_MS);
@@ -29,7 +36,7 @@ test(
 
     const txt = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await txt.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await txt.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(txt, "desktop");
       await txt.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       assert.match(txt.serial, /Открыть/);
@@ -41,7 +48,7 @@ test(
 
     const docx = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await docx.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await docx.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(docx, "desktop");
       await docx.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(docx, 268, "docx: genesis docx note");
@@ -51,7 +58,7 @@ test(
 
     const img = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await img.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await img.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(img, "desktop");
       await img.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(img, 328, "image: ok");
@@ -61,7 +68,7 @@ test(
 
     const pdf = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await pdf.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await pdf.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(pdf, "desktop");
       await pdf.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(pdf, 448, "pdf: genesis pdf");
@@ -71,7 +78,7 @@ test(
 
     const mp4 = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await mp4.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await mp4.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(mp4, "desktop");
       await mp4.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(mp4, 508, "mp4: play");

@@ -24,7 +24,7 @@ static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
 
 static int active;
 static char name[FS_NAME];
-static char buf[FS_DATA];
+static char *const buf = (char *)EDITOR_BUF_ADDR;
 static unsigned int len;
 static unsigned int cur;      /* byte offset of the cursor */
 static int top;               /* first visible line */

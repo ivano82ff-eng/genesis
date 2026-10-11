@@ -16,7 +16,7 @@ test("developer shell: shift, variables, redirects, pipes, scripts, history", { 
     await guest.waitForSerial(answer, DEFAULT_TIMEOUT_MS);
   };
   try {
-    await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+    await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
     // Shift: capitals and symbols reach the shell (quotes keep them literal).
     await ask('echo "A_B:C!|@<>"', "\nA_B:C!|@<>\n");
     // Variables and ; sequencing.
@@ -24,7 +24,7 @@ test("developer shell: shift, variables, redirects, pipes, scripts, history", { 
     // Redirect then cat; >> appends.
     await ask("echo one > f1; echo two >> f1; cat f1", "cat: one\ntwo\n");
     // Pipes.
-    await ask("ls | grep ticker > found; cat found", "cat: ls:");
+    await ask("ls /bin | grep ticker > found; cat found", "cat: ls:");
     for (let i = 0; i < 100 && !/cat: ls:[^\n]*\n/.test(guest.serial); i++) {
       await delay(100);
     }

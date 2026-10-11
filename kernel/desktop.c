@@ -25,6 +25,10 @@ static int editor_len;
 static int file_slot[8];
 static int file_rows;
 static char shown_name[16];
+/* Folder shown by «Файлы»/«Открыть»; row slot -1 is "..". */
+static char desk_dir[FS_NAME] = "/home";
+static char row_name[8][FS_PART + 1];
+static int row_dir[8];
 static char shown_text[96];
 
 extern void console_puts(const char *text);
@@ -33,10 +37,8 @@ extern void memory_summary(char *dest, unsigned int cap);
 extern void fs_summary(char *dest, unsigned int cap);
 extern void preview_readme(char *dest, unsigned int cap);
 extern int fs_store_readme(const char *text);
-extern int fs_export(int index, char *name, unsigned int name_cap, unsigned char *data,
-                     unsigned int *length);
-extern int fs_entry(int index, char *name, unsigned int name_cap, unsigned int *length);
 extern int fs_lookup(const char *name, const unsigned char **data, unsigned int *length);
+extern int fs_dir_entry(int index, const char *dir, char *name, unsigned int name_cap, int *is_dir);
 extern void guest_yield(void);
 extern void disk_request_home(void);
 extern void machine_poweroff(void);
@@ -342,17 +344,52 @@ static int is_hidden_name(const char *name) {
 
 static void collect_files(void) {
     file_rows = 0;
-    for (int i = 0; i < FS_MAX && file_rows < 8; i++) {
-        char name[16];
-        unsigned int length = 0;
-        if (!fs_entry(i, name, sizeof name, &length)) {
-            continue;
-        }
-        if (is_hidden_name(name)) {
-            continue;
-        }
-        file_slot[file_rows++] = i;
+    if (!(desk_dir[0] == '/' && desk_dir[1] == 0)) {
+        file_slot[0] = -1;
+        row_name[0][0] = '.';
+        row_name[0][1] = '.';
+        row_name[0][2] = 0;
+        row_dir[0] = 1;
+        file_rows = 1;
     }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < FS_MAX && file_rows < 8; i++) {
+            char name[FS_PART + 1];
+            int is_dir = 0;
+            if (!fs_dir_entry(i, desk_dir, name, sizeof name, &is_dir) || is_dir != (pass == 0)) {
+                continue;
+            }
+            if (is_hidden_name(name)) {
+                continue;
+            }
+            file_slot[file_rows] = i;
+            row_dir[file_rows] = is_dir;
+            for (unsigned int k = 0; k < sizeof name; k++) {
+                row_name[file_rows][k] = name[k];
+            }
+            file_rows++;
+        }
+    }
+}
+
+/* "ls: a b/ c" for the shown folder, so the serial log mirrors the screen. */
+static void rows_summary(char *dest, unsigned int cap) {
+    unsigned int used = 0;
+    for (int r = 0; r < file_rows; r++) {
+        if (file_slot[r] < 0) {
+            continue;
+        }
+        if (used != 0 && used + 1 < cap) {
+            dest[used++] = ' ';
+        }
+        for (const char *c = row_name[r]; *c != 0 && used + 1 < cap; c++) {
+            dest[used++] = *c;
+        }
+        if (row_dir[r] && used + 1 < cap) {
+            dest[used++] = '/';
+        }
+    }
+    dest[used] = 0;
 }
 
 static void draw_bar(void);
@@ -465,12 +502,21 @@ static void draw_section_ui(void) {
     }
     if (view == VIEW_FILES) {
         text(48, 84, shown_name[0] ? shown_name : "Файлы", YELLOW, 2);
+        text(400, 84, desk_dir, INK, 2);
         for (int i = 0; i < file_rows; i++) {
-            char name[16];
-            unsigned int length = 0;
+            char name[FS_PART + 16];
+            unsigned int n = 0;
+            const char *label = file_slot[i] < 0 ? ".. Назад" : row_name[i];
+            while (label[n] != 0 && n + 2 < sizeof name) {
+                name[n] = label[n];
+                n++;
+            }
+            if (row_dir[i] && file_slot[i] >= 0) {
+                name[n++] = '/';
+            }
+            name[n] = 0;
             int top = ROW_Y0 + i * ROW_STRIDE;
-            fs_entry(file_slot[i], name, sizeof name, &length);
-            fill(24, top, FB_W - 48, ROW_H, FRAME);
+            fill(24, top, FB_W - 48, ROW_H, row_dir[i] ? YELLOW : FRAME);
             fill(28, top + 4, FB_W - 56, ROW_H - 8, PAPER);
             text(48, top + 16, name, INK, 2);
         }
@@ -587,7 +633,12 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
                           const char *fname) {
     const unsigned char *prog = 0;
     unsigned int prog_len = 0;
-    if (!fs_lookup(viewer, &prog, &prog_len) || prog_len == 0) {
+    char vpath[FS_NAME] = "/bin/";
+    for (unsigned int k = 0; viewer[k] != 0 && k + 6 < FS_NAME; k++) {
+        vpath[5 + k] = viewer[k];
+        vpath[6 + k] = 0;
+    }
+    if (!fs_lookup(vpath, &prog, &prog_len) || prog_len == 0) {
         console_puts("viewer: missing\n");
         return;
     }
@@ -660,7 +711,7 @@ static void show_files(void) {
     collect_files();
     mouse_arm();
     view = VIEW_FILES;
-    fs_summary(line, sizeof line);
+    rows_summary(line, sizeof line);
     redraw_all();
     say_back();
     console_puts("ls: ");
@@ -680,7 +731,7 @@ static void show_open(void) {
     collect_files();
     mouse_arm();
     view = VIEW_FILES;
-    fs_summary(line, sizeof line);
+    rows_summary(line, sizeof line);
     redraw_all();
     say_back();
     console_puts("open: ");
@@ -704,20 +755,54 @@ static void show_editor(void) {
 }
 
 static void show_file(int row) {
-    char name[16];
-    unsigned int length = 0;
+    char path[FS_NAME];
     const unsigned char *bytes = 0;
+    unsigned int length = 0;
     if (row < 0 || row >= file_rows) {
         return;
     }
-    if (!fs_entry(file_slot[row], name, sizeof name, &length)) {
+    unsigned int n = 0;
+    while (desk_dir[n] != 0) {
+        path[n] = desk_dir[n];
+        n++;
+    }
+    if (file_slot[row] < 0) {
+        while (n > 1 && path[n - 1] != '/') {
+            n--;
+        }
+        if (n > 1) {
+            n--;
+        }
+    } else {
+        if (n > 1) {
+            path[n++] = '/';
+        }
+        for (const char *c = row_name[row]; *c != 0 && n + 1 < FS_NAME; c++) {
+            path[n++] = *c;
+        }
+    }
+    path[n] = 0;
+    if (row_dir[row]) {
+        for (unsigned int k = 0; k <= n; k++) {
+            desk_dir[k] = path[k];
+        }
+        char line[160];
+        collect_files();
+        mouse_arm();
+        rows_summary(line, sizeof line);
+        redraw_all();
+        console_puts("dir: ");
+        console_puts(desk_dir);
+        console_puts(" ls: ");
+        console_puts(line);
+        console_putc('\n');
         return;
     }
-    if (!fs_lookup(name, &bytes, &length)) {
+    if (!fs_lookup(path, &bytes, &length)) {
         return;
     }
-    const char *viewer = viewer_for_name(name);
-    launch_viewer(viewer, bytes, length, name);
+    const char *viewer = viewer_for_name(row_name[row]);
+    launch_viewer(viewer, bytes, length, row_name[row]);
 }
 
 static void editor_key(char ch) {

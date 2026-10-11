@@ -21,7 +21,7 @@ test(
     const image = await buildImage();
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       let top = 320;

@@ -26,7 +26,7 @@ int install_system(void);
 void disk_request_home(void);
 int disk_consume_home(void);
 int disk_consume_seed(void);
-int grid_unlink(const char *name);
+int disk_consume_migrated(void);
 void machine_poweroff(void);
 void machine_reboot(void);
 void link_init(void);
@@ -885,64 +885,415 @@ static void cmd_alloc(const char *arg) {
 
 #include "fs_limits.h"
 
+/*
+ * In-RAM view of Grid Store. Every entry is keyed by its absolute path
+ * ("/home/notes.txt"); directories are entries with dir = 1. File bytes live
+ * in a 48 MiB pool and are compacted when it fills up. disk.c persists the
+ * table; `dirty` marks files whose bytes are not on disk yet.
+ */
 struct ram_file {
     char name[FS_NAME];
     unsigned char *data;
     unsigned int length;
+    unsigned int cap;
     int used;
+    int dir;
+    int dirty;
+    unsigned int blk;
+    unsigned int nblk;
 };
 
 static struct ram_file ramfs[FS_MAX];
 static unsigned char *const FS_POOL = (unsigned char *)FS_POOL_ADDR;
+static unsigned long pool_top;
+static char cwd[FS_NAME] = "/home";
 
-static unsigned char *fs_slot_data(int index) {
-    return FS_POOL + (unsigned int)index * FS_DATA;
-}
-
-static void fs_copy_name(char *dest, const char *src) {
-    unsigned int i = 0;
-    while (src[i] != 0 && i + 1 < FS_NAME) {
-        dest[i] = src[i];
-        i++;
+static void mem_move(unsigned char *dest, const unsigned char *src, unsigned int n) {
+    if (dest == src || n == 0) {
+        return;
     }
-    dest[i] = 0;
+    if (dest < src) {
+        for (unsigned int i = 0; i < n; i++) {
+            dest[i] = src[i];
+        }
+    } else {
+        for (unsigned int i = n; i > 0; i--) {
+            dest[i - 1] = src[i - 1];
+        }
+    }
 }
 
-static int fs_add(const char *name, const char *data, unsigned int length) {
-    struct ram_file *slot = 0;
-    for (int i = 0; i < FS_MAX; i++) {
-        if (ramfs[i].used && str_eq(ramfs[i].name, name)) {
-            slot = &ramfs[i];
+static unsigned int str_len(const char *s) {
+    unsigned int n = 0;
+    while (s[n] != 0) {
+        n++;
+    }
+    return n;
+}
+
+/* Turn PATH (absolute or relative to cwd; ".", ".." allowed) into a clean
+ * absolute path. Returns 0 if it does not fit. */
+int fs_resolve(const char *path, char *out) {
+    char tmp[FS_NAME * 2];
+    unsigned int t = 0;
+    if (path[0] != '/') {
+        for (const char *c = cwd; *c != 0 && t + 1 < sizeof tmp; c++) {
+            tmp[t++] = *c;
+        }
+        if (t + 1 < sizeof tmp) {
+            tmp[t++] = '/';
+        }
+    }
+    for (const char *c = path; *c != 0; c++) {
+        if (t + 1 >= sizeof tmp) {
+            return 0;
+        }
+        tmp[t++] = *c;
+    }
+    tmp[t] = 0;
+    unsigned int o = 0;
+    out[o] = 0;
+    unsigned int i = 0;
+    while (tmp[i] != 0) {
+        while (tmp[i] == '/') {
+            i++;
+        }
+        if (tmp[i] == 0) {
             break;
         }
-        if (!ramfs[i].used && slot == 0) {
-            slot = &ramfs[i];
+        unsigned int s = i;
+        while (tmp[i] != 0 && tmp[i] != '/') {
+            i++;
         }
+        unsigned int n = i - s;
+        if (n == 1 && tmp[s] == '.') {
+            continue;
+        }
+        if (n == 2 && tmp[s] == '.' && tmp[s + 1] == '.') {
+            while (o > 0 && out[o - 1] != '/') {
+                o--;
+            }
+            if (o > 0) {
+                o--;
+            }
+            out[o] = 0;
+            continue;
+        }
+        if (n >= FS_PART || o + 1 + n + 1 > FS_NAME) {
+            return 0;
+        }
+        out[o++] = '/';
+        for (unsigned int k = 0; k < n; k++) {
+            out[o++] = tmp[s + k];
+        }
+        out[o] = 0;
     }
-    if (slot == 0 || name[0] == 0) {
-        return 0;
+    if (o == 0) {
+        out[0] = '/';
+        out[1] = 0;
     }
-    if (length > FS_DATA) {
-        length = FS_DATA;
-    }
-    int index = (int)(slot - ramfs);
-    slot->data = fs_slot_data(index);
-    fs_copy_name(slot->name, name);
-    for (unsigned int i = 0; i < length; i++) {
-        slot->data[i] = (unsigned char)data[i];
-    }
-    slot->length = length;
-    slot->used = 1;
     return 1;
 }
 
-static struct ram_file *fs_find(const char *name) {
+/* Is ABS directly inside directory DIR? */
+static int fs_in_dir(const char *abs, const char *dir) {
+    unsigned int d = str_len(dir);
+    if (d == 1) {
+        d = 0; /* root */
+    }
+    for (unsigned int i = 0; i < d; i++) {
+        if (abs[i] != dir[i]) {
+            return 0;
+        }
+    }
+    if (abs[d] != '/' || abs[d + 1] == 0) {
+        return 0;
+    }
+    for (const char *c = abs + d + 1; *c != 0; c++) {
+        if (*c == '/') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static const char *base_name(const char *abs) {
+    const char *b = abs;
+    for (const char *c = abs; *c != 0; c++) {
+        if (*c == '/') {
+            b = c + 1;
+        }
+    }
+    return b;
+}
+
+static struct ram_file *fs_find_abs(const char *abs) {
     for (int i = 0; i < FS_MAX; i++) {
-        if (ramfs[i].used && str_eq(ramfs[i].name, name)) {
+        if (ramfs[i].used && str_eq(ramfs[i].name, abs)) {
             return &ramfs[i];
         }
     }
     return 0;
+}
+
+static int fs_is_dir_abs(const char *abs) {
+    if (abs[0] == '/' && abs[1] == 0) {
+        return 1;
+    }
+    struct ram_file *f = fs_find_abs(abs);
+    return f != 0 && f->dir;
+}
+
+static int fs_parent_ok(const char *abs) {
+    char parent[FS_NAME];
+    unsigned int n = 0;
+    const char *b = base_name(abs);
+    while (abs + n < b - 1 && n + 1 < FS_NAME) {
+        parent[n] = abs[n];
+        n++;
+    }
+    if (n == 0) {
+        parent[n++] = '/';
+    }
+    parent[n] = 0;
+    return fs_is_dir_abs(parent);
+}
+
+/* Files only: a path naming a directory is "no such file". */
+static struct ram_file *fs_find(const char *name) {
+    char abs[FS_NAME];
+    if (name[0] == 0 || !fs_resolve(name, abs)) {
+        return 0;
+    }
+    struct ram_file *f = fs_find_abs(abs);
+    return f != 0 && !f->dir ? f : 0;
+}
+
+static struct ram_file *fs_free_slot(void) {
+    for (int i = 0; i < FS_MAX; i++) {
+        if (!ramfs[i].used) {
+            return &ramfs[i];
+        }
+    }
+    return 0;
+}
+
+static void fs_compact(void) {
+    static unsigned char placed[FS_MAX];
+    unsigned long cursor = 0;
+    for (int i = 0; i < FS_MAX; i++) {
+        placed[i] = !(ramfs[i].used && !ramfs[i].dir && ramfs[i].cap > 0);
+    }
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < FS_MAX; i++) {
+            if (!placed[i] && (best < 0 || ramfs[i].data < ramfs[best].data)) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        placed[best] = 1;
+        mem_move(FS_POOL + cursor, ramfs[best].data, ramfs[best].length);
+        ramfs[best].data = FS_POOL + cursor;
+        cursor += ramfs[best].cap;
+    }
+    pool_top = cursor;
+}
+
+static unsigned long fs_pool_live(const struct ram_file *skip) {
+    unsigned long live = 0;
+    for (int i = 0; i < FS_MAX; i++) {
+        if (ramfs[i].used && !ramfs[i].dir && &ramfs[i] != skip) {
+            live += ramfs[i].cap;
+        }
+    }
+    return live;
+}
+
+/* Store a file at an absolute path. Fails (returns 0) when the parent
+ * directory is missing, the path is a directory, or there is no room. */
+static int fs_put_abs(const char *abs, const char *data, unsigned int length) {
+    if (length > FS_DATA || abs[0] != '/' || abs[1] == 0) {
+        return 0;
+    }
+    struct ram_file *slot = fs_find_abs(abs);
+    if (slot != 0 && slot->dir) {
+        return 0;
+    }
+    if (slot == 0 && (!fs_parent_ok(abs) || (slot = fs_free_slot()) == 0)) {
+        return 0;
+    }
+    const unsigned char *src = (const unsigned char *)data;
+    if (slot->used && length <= slot->cap) {
+        mem_move(slot->data, src, length);
+    } else {
+        unsigned int cap = (length + 15u) & ~15u;
+        if (fs_pool_live(slot->used ? slot : 0) + cap > FS_POOL_SIZE) {
+            return 0;
+        }
+        if (src >= FS_POOL && src < FS_POOL + FS_POOL_SIZE) {
+            unsigned char *scratch = (unsigned char *)FS_MOVE_ADDR;
+            mem_move(scratch, src, length);
+            src = scratch;
+        }
+        if (slot->used) {
+            slot->used = 0; /* drop the old bytes; compaction reclaims them */
+        }
+        if (pool_top + cap > FS_POOL_SIZE) {
+            fs_compact();
+        }
+        slot->data = FS_POOL + pool_top;
+        pool_top += cap;
+        slot->cap = cap;
+        mem_move(slot->data, src, length);
+    }
+    if (!slot->used) {
+        unsigned int n = 0;
+        while (abs[n] != 0 && n + 1 < FS_NAME) {
+            slot->name[n] = abs[n];
+            n++;
+        }
+        slot->name[n] = 0;
+        slot->nblk = 0;
+    }
+    slot->length = length;
+    slot->used = 1;
+    slot->dir = 0;
+    slot->dirty = 1;
+    return 1;
+}
+
+static int fs_add(const char *name, const char *data, unsigned int length) {
+    char abs[FS_NAME];
+    if (name[0] == 0 || !fs_resolve(name, abs)) {
+        return 0;
+    }
+    return fs_put_abs(abs, data, length);
+}
+
+static int fs_mkdir_abs(const char *abs) {
+    if (fs_find_abs(abs) != 0 || (abs[0] == '/' && abs[1] == 0)) {
+        return fs_is_dir_abs(abs) ? 2 : 0;
+    }
+    struct ram_file *slot;
+    if (!fs_parent_ok(abs) || (slot = fs_free_slot()) == 0) {
+        return 0;
+    }
+    unsigned int n = 0;
+    while (abs[n] != 0 && n + 1 < FS_NAME) {
+        slot->name[n] = abs[n];
+        n++;
+    }
+    slot->name[n] = 0;
+    slot->used = 1;
+    slot->dir = 1;
+    slot->length = 0;
+    slot->cap = 0;
+    slot->data = 0;
+    slot->dirty = 0;
+    slot->nblk = 0;
+    return 1;
+}
+
+static int fs_dir_empty(const char *abs) {
+    for (int i = 0; i < FS_MAX; i++) {
+        if (ramfs[i].used && fs_in_dir(ramfs[i].name, abs)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ---- disk.c interface ---- */
+void fs_clear_all(void) {
+    for (int i = 0; i < FS_MAX; i++) {
+        ramfs[i].used = 0;
+        ramfs[i].length = 0;
+        ramfs[i].cap = 0;
+        ramfs[i].name[0] = 0;
+    }
+    pool_top = 0;
+}
+
+/* Load one catalog entry as-is (already on disk, so clean). */
+int fs_load_entry(const char *abs, int is_dir, const unsigned char *data, unsigned int length,
+                  unsigned int blk, unsigned int nblk) {
+    struct ram_file *slot = fs_find_abs(abs);
+    if (slot == 0 && (slot = fs_free_slot()) == 0) {
+        return 0;
+    }
+    if (is_dir) {
+        if (slot->used) {
+            return slot->dir;
+        }
+        unsigned int n = 0;
+        while (abs[n] != 0 && n + 1 < FS_NAME) {
+            slot->name[n] = abs[n];
+            n++;
+        }
+        slot->name[n] = 0;
+        slot->used = 1;
+        slot->dir = 1;
+        slot->length = 0;
+        slot->cap = 0;
+        slot->data = 0;
+        slot->dirty = 0;
+        slot->nblk = 0;
+        return 1;
+    }
+    unsigned int cap = (length + 15u) & ~15u;
+    if (slot->used || pool_top + cap > FS_POOL_SIZE) {
+        return 0;
+    }
+    slot->data = FS_POOL + pool_top;
+    pool_top += cap;
+    slot->cap = cap;
+    mem_move(slot->data, data, length);
+    unsigned int n = 0;
+    while (abs[n] != 0 && n + 1 < FS_NAME) {
+        slot->name[n] = abs[n];
+        n++;
+    }
+    slot->name[n] = 0;
+    slot->length = length;
+    slot->used = 1;
+    slot->dir = 0;
+    slot->dirty = 0;
+    slot->blk = blk;
+    slot->nblk = nblk;
+    return 1;
+}
+
+int fs_slot(int i, const char **name, const unsigned char **data, unsigned int *length, int *is_dir,
+            int *dirty, unsigned int *blk, unsigned int *nblk) {
+    if (i < 0 || i >= FS_MAX || !ramfs[i].used) {
+        return 0;
+    }
+    *name = ramfs[i].name;
+    *data = ramfs[i].data;
+    *length = ramfs[i].length;
+    *is_dir = ramfs[i].dir;
+    *dirty = ramfs[i].dirty;
+    *blk = ramfs[i].blk;
+    *nblk = ramfs[i].nblk;
+    return 1;
+}
+
+void fs_slot_saved(int i, unsigned int blk, unsigned int nblk) {
+    ramfs[i].blk = blk;
+    ramfs[i].nblk = nblk;
+    ramfs[i].dirty = 0;
+}
+
+/* After loading an older disk every file is new to this format. */
+void fs_mark_all_dirty(void) {
+    for (int i = 0; i < FS_MAX; i++) {
+        if (ramfs[i].used && !ramfs[i].dir) {
+            ramfs[i].dirty = 1;
+        }
+    }
 }
 
 extern const unsigned char hello_bin[];
@@ -977,64 +1328,49 @@ extern const unsigned char sample_clip_mp4_end[];
 /* Set while refreshing an existing disk: add built-in files only where missing. */
 static int seed_only_missing;
 
-static void fs_seed_blob(const char *name, const unsigned char *start, const unsigned char *end) {
-    if (seed_only_missing && fs_find(name)) {
+static void fs_seed_blob(const char *abs, const unsigned char *start, const unsigned char *end) {
+    if (seed_only_missing && fs_find_abs(abs)) {
         return;
     }
-    fs_add(name, (const char *)start, (unsigned int)(end - start));
+    fs_put_abs(abs, (const char *)start, (unsigned int)(end - start));
 }
 
+/* Layout: /bin programs, /lib pkg libraries, /docs samples, /home your files. */
 static void fs_seed(void) {
-    if (!seed_only_missing || !fs_find("readme")) {
-        fs_add("readme", "welcome to genesis", 18);
+    fs_mkdir_abs("/bin");
+    fs_mkdir_abs("/lib");
+    fs_mkdir_abs("/docs");
+    fs_mkdir_abs("/home");
+    if (!seed_only_missing || !fs_find_abs("/home/readme")) {
+        fs_put_abs("/home/readme", "welcome to genesis", 18);
     }
-    fs_seed_blob("hello", hello_bin, hello_bin_end);
-    fs_seed_blob("open", open_bin, open_bin_end);
-    fs_seed_blob("vtxt", vtxt_bin, vtxt_bin_end);
-    fs_seed_blob("vdocx", vdocx_bin, vdocx_bin_end);
-    fs_seed_blob("vimg", vimg_bin, vimg_bin_end);
-    fs_seed_blob("vpdf", vpdf_bin, vpdf_bin_end);
-    fs_seed_blob("vmp4", vmp4_bin, vmp4_bin_end);
-    fs_seed_blob("note.txt", sample_note_txt, sample_note_txt_end);
-    fs_seed_blob("note.docx", sample_note_docx, sample_note_docx_end);
-    fs_seed_blob("pic.png", sample_pic_png, sample_pic_png_end);
-    fs_seed_blob("pic.jpg", sample_pic_jpg, sample_pic_jpg_end);
-    fs_seed_blob("note.pdf", sample_note_pdf, sample_note_pdf_end);
-    fs_seed_blob("clip.mp4", sample_clip_mp4, sample_clip_mp4_end);
-    fs_seed_blob("ticker", ticker_bin, ticker_bin_end);
+    fs_seed_blob("/bin/hello", hello_bin, hello_bin_end);
+    fs_seed_blob("/bin/open", open_bin, open_bin_end);
+    fs_seed_blob("/bin/vtxt", vtxt_bin, vtxt_bin_end);
+    fs_seed_blob("/bin/vdocx", vdocx_bin, vdocx_bin_end);
+    fs_seed_blob("/bin/vimg", vimg_bin, vimg_bin_end);
+    fs_seed_blob("/bin/vpdf", vpdf_bin, vpdf_bin_end);
+    fs_seed_blob("/bin/vmp4", vmp4_bin, vmp4_bin_end);
+    fs_seed_blob("/bin/ticker", ticker_bin, ticker_bin_end);
+    fs_seed_blob("/docs/note.txt", sample_note_txt, sample_note_txt_end);
+    fs_seed_blob("/docs/note.docx", sample_note_docx, sample_note_docx_end);
+    fs_seed_blob("/docs/pic.png", sample_pic_png, sample_pic_png_end);
+    fs_seed_blob("/docs/pic.jpg", sample_pic_jpg, sample_pic_jpg_end);
+    fs_seed_blob("/docs/note.pdf", sample_note_pdf, sample_note_pdf_end);
+    fs_seed_blob("/docs/clip.mp4", sample_clip_mp4, sample_clip_mp4_end);
 }
 
-void fs_clear_all(void) {
-    for (int i = 0; i < FS_MAX; i++) {
-        ramfs[i].used = 0;
-        ramfs[i].length = 0;
-        ramfs[i].name[0] = 0;
+/* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
+int fs_builtin_name(const char *name) {
+    static const char *const names[] = {"readme", "hello", "open", "vtxt", "vdocx", "vimg", "vpdf",
+                                        "vmp4", "ticker", "note.txt", "note.docx", "pic.png",
+                                        "pic.jpg", "note.pdf", "clip.mp4"};
+    for (unsigned int i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (str_eq(name, names[i])) {
+            return 1;
+        }
     }
-}
-
-int fs_export(int index, char *name, unsigned int name_cap, unsigned char *data, unsigned int *length) {
-    if (index < 0 || index >= FS_MAX || !ramfs[index].used || name_cap == 0) {
-        return 0;
-    }
-    unsigned int n = 0;
-    while (ramfs[index].name[n] != 0 && n + 1 < name_cap) {
-        name[n] = ramfs[index].name[n];
-        n++;
-    }
-    name[n] = 0;
-    unsigned int count = ramfs[index].length;
-    if (count > FS_DATA) {
-        count = FS_DATA;
-    }
-    for (unsigned int i = 0; i < count; i++) {
-        data[i] = ramfs[index].data[i];
-    }
-    *length = count;
-    return 1;
-}
-
-void fs_import(const char *name, const unsigned char *data, unsigned int length) {
-    fs_add(name, (const char *)data, length);
+    return 0;
 }
 
 int fs_lookup(const char *name, const unsigned char **data, unsigned int *length) {
@@ -1047,35 +1383,32 @@ int fs_lookup(const char *name, const unsigned char **data, unsigned int *length
     return 1;
 }
 
-int fs_entry(int index, char *name, unsigned int name_cap, unsigned int *length) {
-    if (index < 0 || index >= FS_MAX || !ramfs[index].used || name_cap == 0) {
+/* Desktop browser: entry i if it sits directly in DIR. */
+int fs_dir_entry(int index, const char *dir, char *name, unsigned int name_cap, int *is_dir) {
+    if (index < 0 || index >= FS_MAX || !ramfs[index].used || name_cap == 0 ||
+        !fs_in_dir(ramfs[index].name, dir)) {
         return 0;
     }
+    const char *b = base_name(ramfs[index].name);
     unsigned int n = 0;
-    while (ramfs[index].name[n] != 0 && n + 1 < name_cap) {
-        name[n] = ramfs[index].name[n];
+    while (b[n] != 0 && n + 1 < name_cap) {
+        name[n] = b[n];
         n++;
     }
     name[n] = 0;
-    if (length) {
-        *length = ramfs[index].length;
-    }
+    *is_dir = ramfs[index].dir;
     return 1;
 }
 
 int fs_store_readme(const char *text) {
-    unsigned int length = 0;
-    while (text[length] != 0) {
-        length++;
-    }
-    if (!fs_add("readme", text, length)) {
+    if (!fs_put_abs("/home/readme", text, str_len(text))) {
         return 0;
     }
     return disk_save();
 }
 
 void preview_readme(char *dest, unsigned int cap) {
-    struct ram_file *file = fs_find("readme");
+    struct ram_file *file = fs_find_abs("/home/readme");
     unsigned int n = 0;
     if (cap == 0) {
         return;
@@ -1089,14 +1422,34 @@ void preview_readme(char *dest, unsigned int cap) {
     dest[n] = 0;
 }
 
-static void cmd_ls(void) {
-    console_puts("ls:");
-    for (int i = 0; i < FS_MAX; i++) {
-        if (!ramfs[i].used) {
-            continue;
+static void cmd_ls(const char *arg) {
+    char abs[FS_NAME];
+    if (!fs_resolve(arg[0] ? arg : ".", abs)) {
+        console_puts("ls: bad path\n");
+        return;
+    }
+    if (!fs_is_dir_abs(abs)) {
+        if (fs_find_abs(abs)) {
+            console_puts("ls: ");
+            console_puts(base_name(abs));
+            console_putc('\n');
+        } else {
+            console_puts("ls: no such directory\n");
         }
-        console_putc(' ');
-        console_puts(ramfs[i].name);
+        return;
+    }
+    console_puts("ls:");
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < FS_MAX; i++) {
+            if (!ramfs[i].used || ramfs[i].dir != (pass == 0) || !fs_in_dir(ramfs[i].name, abs)) {
+                continue;
+            }
+            console_putc(' ');
+            console_puts(base_name(ramfs[i].name));
+            if (ramfs[i].dir) {
+                console_putc('/');
+            }
+        }
     }
     console_putc('\n');
 }
@@ -1114,19 +1467,13 @@ static void cmd_cat(const char *name) {
     console_putc('\n');
 }
 
-/* Scratch buffer for appends (>>), one Grid Store file in size. */
-static char edit_buf[FS_DATA];
+/* Scratch buffer for appends (>>) and cp, one Grid Store file in size. */
+static char *const edit_buf = (char *)FS_EDIT_ADDR;
 
 static void prompt(void);
 
 int fs_get(const char *name, const unsigned char **data, unsigned int *length) {
-    struct ram_file *file = fs_find(name);
-    if (file == 0) {
-        return 0;
-    }
-    *data = file->data;
-    *length = file->length;
-    return 1;
+    return fs_lookup(name, data, length);
 }
 
 int fs_put(const char *name, const char *data, unsigned int length) {
@@ -1146,9 +1493,9 @@ static void cmd_edit(const char *name) {
 }
 
 static void cmd_write(const char *args) {
-    char name[FS_NAME];
+    char name[FS_NAME * 2];
     unsigned int i = 0;
-    while (args[i] != 0 && args[i] != ' ' && i + 1 < FS_NAME) {
+    while (args[i] != 0 && args[i] != ' ' && i + 1 < sizeof name) {
         name[i] = args[i];
         i++;
     }
@@ -1158,12 +1505,8 @@ static void cmd_write(const char *args) {
         return;
     }
     const char *text = args + i + 1;
-    unsigned int length = 0;
-    while (text[length] != 0) {
-        length++;
-    }
-    if (!fs_add(name, text, length)) {
-        console_puts("write: full\n");
+    if (!fs_add(name, text, str_len(text))) {
+        console_puts("write: full, or no such folder\n");
         return;
     }
     if (!disk_save()) {
@@ -1174,24 +1517,25 @@ static void cmd_write(const char *args) {
     console_putc('\n');
 }
 
-static int fs_remove(const char *name) {
-    for (int i = 0; i < FS_MAX; i++) {
-        if (ramfs[i].used && str_eq(ramfs[i].name, name)) {
-            ramfs[i].used = 0;
-            ramfs[i].length = 0;
-            ramfs[i].name[0] = 0;
-            return 1;
-        }
+static int fs_remove_abs(const char *abs) {
+    struct ram_file *f = fs_find_abs(abs);
+    if (f == 0) {
+        return 0;
     }
-    return 0;
+    f->used = 0;
+    f->length = 0;
+    f->cap = 0;
+    f->name[0] = 0;
+    return 1;
 }
 
 int fs_delete(const char *name) {
-    if (fs_find(name) == 0) {
+    struct ram_file *f = fs_find(name);
+    if (f == 0) {
         return 0;
     }
-    fs_remove(name);
-    grid_unlink(name);
+    fs_remove_abs(f->name);
+    disk_save();
     return 1;
 }
 
@@ -1206,15 +1550,168 @@ int fs_free_slots(void) {
 }
 
 static void cmd_rm(const char *name) {
-    if (name[0] == 0 || fs_find(name) == 0) {
+    struct ram_file *f = name[0] ? fs_find(name) : 0;
+    if (f == 0) {
         console_puts("rm: no such file\n");
         return;
     }
-    fs_remove(name);
-    grid_unlink(name);
+    fs_remove_abs(f->name);
+    disk_save();
     console_puts("rm: ");
     console_puts(name);
     console_putc('\n');
+}
+
+static void cmd_mkdir(const char *name) {
+    char abs[FS_NAME];
+    if (name[0] == 0 || !fs_resolve(name, abs)) {
+        console_puts("mkdir: bad name\n");
+        return;
+    }
+    int r = fs_mkdir_abs(abs);
+    if (r == 2 || (r == 0 && fs_find_abs(abs))) {
+        console_puts("mkdir: already exists\n");
+        return;
+    }
+    if (r == 0) {
+        console_puts("mkdir: no parent folder or full\n");
+        return;
+    }
+    disk_save();
+    console_puts("mkdir: ");
+    console_puts(abs);
+    console_putc('\n');
+}
+
+static void cmd_rmdir(const char *name) {
+    char abs[FS_NAME];
+    struct ram_file *f = 0;
+    if (name[0] != 0 && fs_resolve(name, abs)) {
+        f = fs_find_abs(abs);
+    }
+    if (f == 0 || !f->dir) {
+        console_puts("rmdir: no such folder\n");
+        return;
+    }
+    if (!fs_dir_empty(abs)) {
+        console_puts("rmdir: not empty\n");
+        return;
+    }
+    if (str_eq(abs, cwd)) {
+        console_puts("rmdir: it is the current folder\n");
+        return;
+    }
+    fs_remove_abs(abs);
+    disk_save();
+    console_puts("rmdir: ");
+    console_puts(abs);
+    console_putc('\n');
+}
+
+static void cmd_cd(const char *name) {
+    char abs[FS_NAME];
+    if (!fs_resolve(name[0] ? name : "/home", abs) || !fs_is_dir_abs(abs)) {
+        console_puts("cd: no such folder\n");
+        return;
+    }
+    for (unsigned int i = 0; i < FS_NAME; i++) {
+        cwd[i] = abs[i];
+        if (abs[i] == 0) {
+            break;
+        }
+    }
+}
+
+/* Destination for mv/cp: into a folder keeps the source's name. */
+static int fs_dest(const char *src_abs, const char *dst, char *out) {
+    if (!fs_resolve(dst, out)) {
+        return 0;
+    }
+    if (fs_is_dir_abs(out)) {
+        const char *b = base_name(src_abs);
+        unsigned int n = str_len(out);
+        if (n == 1) {
+            n = 0;
+        }
+        if (n + 1 + str_len(b) + 1 > FS_NAME) {
+            return 0;
+        }
+        out[n++] = '/';
+        for (unsigned int k = 0; b[k] != 0; k++) {
+            out[n++] = b[k];
+        }
+        out[n] = 0;
+    }
+    return 1;
+}
+
+static void cmd_mv_cp(const char *args, int copy) {
+    const char *who = copy ? "cp" : "mv";
+    char a[LINE_MAX];
+    unsigned int n = 0;
+    while (args[n] != 0 && args[n] != ' ' && n + 1 < LINE_MAX) {
+        a[n] = args[n];
+        n++;
+    }
+    a[n] = 0;
+    const char *b = args[n] == ' ' ? args + n + 1 : "";
+    while (*b == ' ') {
+        b++;
+    }
+    struct ram_file *f = a[0] ? fs_find(a) : 0;
+    char dst[FS_NAME];
+    if (f == 0 || b[0] == 0) {
+        console_puts(who);
+        console_puts(f == 0 ? ": no such file\n" : ": need a destination\n");
+        return;
+    }
+    if (!fs_dest(f->name, b, dst) || str_eq(dst, f->name)) {
+        console_puts(who);
+        console_puts(": bad destination\n");
+        return;
+    }
+    char src[FS_NAME];
+    for (unsigned int i = 0; i < FS_NAME; i++) {
+        src[i] = f->name[i];
+    }
+    unsigned int len = f->length;
+    mem_move((unsigned char *)edit_buf, f->data, len);
+    if (!fs_put_abs(dst, edit_buf, len)) {
+        console_puts(who);
+        console_puts(": cannot write (no folder or full)\n");
+        return;
+    }
+    if (!copy) {
+        fs_remove_abs(src);
+    }
+    if (!disk_save()) {
+        console_puts("disk: io failed\n");
+    }
+    console_puts(who);
+    console_puts(": ");
+    console_puts(dst);
+    console_putc('\n');
+}
+
+/* `run NAME`: a path, or a bare name found in the cwd, then /bin (PATH). */
+static struct ram_file *fs_find_prog(const char *name) {
+    struct ram_file *f = fs_find(name);
+    if (f != 0 || name[0] == 0) {
+        return f;
+    }
+    for (const char *c = name; *c != 0; c++) {
+        if (*c == '/') {
+            return 0;
+        }
+    }
+    char abs[FS_NAME] = "/bin/";
+    unsigned int n = 5;
+    for (const char *c = name; *c != 0 && n + 1 < FS_NAME; c++) {
+        abs[n++] = *c;
+    }
+    abs[n] = 0;
+    f = fs_find_abs(abs);
+    return f != 0 && !f->dir ? f : 0;
 }
 
 typedef void (*print_fn)(const char *);
@@ -1226,7 +1723,7 @@ typedef void (*prog_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
 /* background: start the program as a task (`spawn NAME`) and return. */
 static void cmd_run(const char *name, int background) {
-    struct ram_file *file = fs_find(name);
+    struct ram_file *file = fs_find_prog(name);
     if (file == 0) {
         console_puts("run: no such file\n");
         return;
@@ -1303,14 +1800,14 @@ void fs_summary(char *dest, unsigned int cap) {
     unsigned int used = 0;
     dest[0] = 0;
     for (int i = 0; i < FS_MAX; i++) {
-        if (!ramfs[i].used) {
+        if (!ramfs[i].used || !fs_in_dir(ramfs[i].name, "/home")) {
             continue;
         }
         if (used != 0 && used + 1 < cap) {
             dest[used++] = ' ';
         }
-        for (unsigned int n = 0; ramfs[i].name[n] != 0 && used + 1 < cap; n++) {
-            dest[used++] = ramfs[i].name[n];
+        for (const char *c = base_name(ramfs[i].name); *c != 0 && used + 1 < cap; c++) {
+            dest[used++] = *c;
         }
         dest[used] = 0;
     }
@@ -1331,6 +1828,7 @@ static void execute(char *input) {
     }
     if (str_eq(input, "help")) {
         console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
+        console_puts("folders: pwd cd mkdir rmdir mv cp  paths: /docs/note.txt ../x ./y\n");
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         return;
@@ -1358,8 +1856,33 @@ static void execute(char *input) {
         cmd_alloc(input[5] == ' ' ? input + 6 : "");
         return;
     }
-    if (str_eq(input, "ls")) {
-        cmd_ls();
+    if (str_eq(input, "ls") || starts_with(input, "ls ")) {
+        cmd_ls(input[2] == ' ' ? input + 3 : "");
+        return;
+    }
+    if (str_eq(input, "pwd")) {
+        console_puts(cwd);
+        console_putc('\n');
+        return;
+    }
+    if (str_eq(input, "cd") || starts_with(input, "cd ")) {
+        cmd_cd(input[2] == ' ' ? input + 3 : "");
+        return;
+    }
+    if (str_eq(input, "mkdir") || starts_with(input, "mkdir ")) {
+        cmd_mkdir(input[5] == ' ' ? input + 6 : "");
+        return;
+    }
+    if (str_eq(input, "rmdir") || starts_with(input, "rmdir ")) {
+        cmd_rmdir(input[5] == ' ' ? input + 6 : "");
+        return;
+    }
+    if (str_eq(input, "mv") || starts_with(input, "mv ")) {
+        cmd_mv_cp(input[2] == ' ' ? input + 3 : "", 0);
+        return;
+    }
+    if (str_eq(input, "cp") || starts_with(input, "cp ")) {
+        cmd_mv_cp(input[2] == ' ' ? input + 3 : "", 1);
         return;
     }
     if (str_eq(input, "cat") || starts_with(input, "cat ")) {
@@ -1429,7 +1952,9 @@ static void execute(char *input) {
 }
 
 static void prompt(void) {
-    console_puts("genesis> ");
+    console_puts("genesis:");
+    console_puts(cwd);
+    console_puts("> ");
 }
 
 static void sh_run_line(const char *src);
@@ -1443,7 +1968,7 @@ void desktop_run(const char *cmd, char *out, unsigned int size) {
         n++;
     }
     copy[n] = 0;
-    console_puts("genesis> ");
+    prompt();
     console_puts(copy);
     console_putc('\n');
     desk_cap_len = 0;
@@ -1739,8 +2264,12 @@ static void sh_head(char **argv, int argc) {
 
 static void sh_run_line(const char *src);
 
-static void sh_script(const char *name) {
-    struct ram_file *f = fs_find(name);
+static void sh_script(const char *path) {
+    char name[FS_NAME];
+    if (!fs_resolve(path, name)) {
+        name[0] = 0;
+    }
+    struct ram_file *f = name[0] ? fs_find(name) : 0;
     if (f == 0) {
         console_puts("sh: no such file\n");
         return;
@@ -2092,7 +2621,7 @@ __attribute__((noreturn)) void kmain(unsigned int mb_info) {
         if (!disk_save()) {
             serial_puts("disk: io failed\n");
         }
-    } else if (disk_consume_seed()) {
+    } else if (disk_consume_seed() | disk_consume_migrated()) {
         /* Host imported files (npm run look): restore any missing built-ins. */
         seed_only_missing = 1;
         fs_seed();

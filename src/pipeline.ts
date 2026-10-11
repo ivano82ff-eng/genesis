@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const BOOT_MARKER = "genesis: kernel booted";
 
 /** Guest prompt printed after the boot line. */
-export const PROMPT = "genesis> ";
+export const PROMPT = "genesis:/home> ";
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
 

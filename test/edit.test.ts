@@ -31,7 +31,7 @@ test(
       diskPath: disk,
     });
     try {
-      await first.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await first.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "edit readme");
       await first.waitForSerial("edit: welcome to genesis", DEFAULT_TIMEOUT_MS);
       // Full-screen editor: the text goes in at the cursor (start of file).
@@ -52,7 +52,7 @@ test(
       diskPath: disk,
     });
     try {
-      await second.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await second.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat readme");
       await second.waitForSerial("cat: kept text", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat note");

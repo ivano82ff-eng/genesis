@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { readFile, stat, truncate, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -196,11 +196,18 @@ async function freePort(): Promise<number> {
   });
 }
 
+/** Grid Store disk size; the file is created sparse (or grown) to this. */
+export const DISK_BYTES = 32 * 1024 * 1024;
+
 async function ensureDisk(diskPath: string): Promise<void> {
+  let size = -1;
   try {
-    await stat(diskPath);
+    size = (await stat(diskPath)).size;
   } catch {
-    await writeFile(diskPath, Buffer.alloc(8 * 1024 * 1024));
+    await writeFile(diskPath, Buffer.alloc(0));
+  }
+  if (size < DISK_BYTES) {
+    await truncate(diskPath, DISK_BYTES);
   }
 }
 
