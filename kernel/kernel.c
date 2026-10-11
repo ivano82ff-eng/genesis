@@ -25,6 +25,7 @@ int disk_save(void);
 int install_system(void);
 void disk_request_home(void);
 int disk_consume_home(void);
+int grid_unlink(const char *name);
 void machine_poweroff(void);
 void machine_reboot(void);
 void link_init(void);
@@ -59,6 +60,24 @@ static void vga_puts(int row, int col, const char *text) {
 static int type_row = 1;
 static int type_col = 0;
 
+static void screen_scroll(void) {
+    const unsigned short blank = (unsigned short)((VGA_ATTR << 8) | ' ');
+    for (int i = VGA_COLS; i < VGA_COLS * VGA_ROWS; i++) {
+        VGA[i - VGA_COLS] = VGA[i];
+    }
+    for (int i = (VGA_ROWS - 1) * VGA_COLS; i < VGA_COLS * VGA_ROWS; i++) {
+        VGA[i] = blank;
+    }
+}
+
+static void screen_advance_row(void) {
+    if (type_row + 1 >= VGA_ROWS) {
+        screen_scroll();
+    } else {
+        type_row++;
+    }
+}
+
 static void screen_putc(char ch) {
     const unsigned short blank = (unsigned short)((VGA_ATTR << 8) | ' ');
     if (ch == '\b') {
@@ -70,16 +89,12 @@ static void screen_putc(char ch) {
     }
     if (ch == '\n') {
         type_col = 0;
-        if (type_row + 1 < VGA_ROWS) {
-            type_row++;
-        }
+        screen_advance_row();
         return;
     }
     if (type_col >= VGA_COLS) {
         type_col = 0;
-        if (type_row + 1 < VGA_ROWS) {
-            type_row++;
-        }
+        screen_advance_row();
     }
     VGA[type_row * VGA_COLS + type_col] = (unsigned short)((VGA_ATTR << 8) | (unsigned char)ch);
     type_col++;
@@ -861,6 +876,30 @@ static void cmd_write(const char *args) {
     console_putc('\n');
 }
 
+static int fs_remove(const char *name) {
+    for (int i = 0; i < FS_MAX; i++) {
+        if (ramfs[i].used && str_eq(ramfs[i].name, name)) {
+            ramfs[i].used = 0;
+            ramfs[i].length = 0;
+            ramfs[i].name[0] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void cmd_rm(const char *name) {
+    if (name[0] == 0 || fs_find(name) == 0) {
+        console_puts("rm: no such file\n");
+        return;
+    }
+    fs_remove(name);
+    grid_unlink(name);
+    console_puts("rm: ");
+    console_puts(name);
+    console_putc('\n');
+}
+
 typedef void (*print_fn)(const char *);
 typedef void (*prog_fn)(print_fn print);
 
@@ -881,6 +920,8 @@ static void cmd_run(const char *name) {
     program_len = 0;
     program_text[0] = 0;
     program_capture = 1;
+    /* Programs are machine code run in ring 0: no isolation, a bad program
+     * can hang the whole kernel. Fine for a demo, not a userspace. */
     prog_fn program = (prog_fn)(void *)dest;
     program(console_puts);
     program_capture = 0;
@@ -956,7 +997,7 @@ static void execute(char *input) {
         return;
     }
     if (str_eq(input, "help")) {
-        console_puts("commands: help echo clear mem alloc heap ls cat write run desktop\n");
+        console_puts("commands: help echo clear mem alloc heap ls cat write rm run desktop\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -965,8 +1006,7 @@ static void execute(char *input) {
         type_col = 0;
         return;
     }
-    if (input[0] == 'e' && input[1] == 'c' && input[2] == 'h' && input[3] == 'o' &&
-        (input[4] == 0 || input[4] == ' ')) {
+    if (str_eq(input, "echo") || starts_with(input, "echo ")) {
         console_puts(input[4] == ' ' ? input + 5 : "");
         console_putc('\n');
         return;
@@ -995,6 +1035,10 @@ static void execute(char *input) {
         cmd_write(input[5] == ' ' ? input + 6 : "");
         return;
     }
+    if (str_eq(input, "rm") || starts_with(input, "rm ")) {
+        cmd_rm(input[2] == ' ' ? input + 3 : "");
+        return;
+    }
     if (str_eq(input, "edit") || starts_with(input, "edit ")) {
         cmd_edit(input[4] == ' ' ? input + 5 : "");
         return;
@@ -1009,9 +1053,11 @@ static void execute(char *input) {
     }
     if (str_eq(input, "poweroff")) {
         machine_poweroff();
+        return;
     }
     if (str_eq(input, "reboot")) {
         machine_reboot();
+        return;
     }
     if (str_eq(input, "ping")) {
         if (!link_up()) {
