@@ -107,7 +107,7 @@ static void screen_putc(char ch) {
 }
 
 /* Scancode set 1, make codes only. Unlisted codes are ignored. */
-static char decode_set1(unsigned char scancode) {
+static char decode_set1(unsigned char scancode, int shift, int caps) {
     static const char map[128] = {
         [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4', [0x06] = '5',
         [0x07] = '6', [0x08] = '7', [0x09] = '8', [0x0a] = '9', [0x0b] = '0',
@@ -118,12 +118,26 @@ static char decode_set1(unsigned char scancode) {
         [0x24] = 'j', [0x25] = 'k', [0x26] = 'l', [0x27] = ';', [0x28] = '\'',
         [0x29] = '`', [0x2b] = '\\', [0x2c] = 'z', [0x2d] = 'x', [0x2e] = 'c',
         [0x2f] = 'v', [0x30] = 'b', [0x31] = 'n', [0x32] = 'm', [0x33] = ',',
-        [0x34] = '.', [0x35] = '/', [0x39] = ' ',
+        [0x34] = '.', [0x35] = '/', [0x39] = ' ', [0x1a] = '[', [0x1b] = ']',
+    };
+    static const char shifted[128] = {
+        [0x02] = '!', [0x03] = '@', [0x04] = '#', [0x05] = '$', [0x06] = '%',
+        [0x07] = '^', [0x08] = '&', [0x09] = '*', [0x0a] = '(', [0x0b] = ')',
+        [0x0c] = '_', [0x0d] = '+', [0x1a] = '{', [0x1b] = '}', [0x27] = ':',
+        [0x28] = '"', [0x29] = '~', [0x2b] = '|', [0x33] = '<', [0x34] = '>',
+        [0x35] = '?',
     };
     if (scancode >= 128) {
         return 0;
     }
-    return map[scancode];
+    char ch = map[scancode];
+    if (ch >= 'a' && ch <= 'z') {
+        return (shift ^ caps) ? (char)(ch - 'a' + 'A') : ch;
+    }
+    if (shift && shifted[scancode] != 0) {
+        return shifted[scancode];
+    }
+    return ch;
 }
 
 static void ps2_wait_write(void) {
@@ -226,6 +240,11 @@ static void shell_input(char ch);
 enum { KBD_RING = 128 };
 
 static unsigned char kbd_bytes[KBD_RING];
+static int kbd_shift;
+static int kbd_caps;
+static int kbd_e0;
+#define KEY_UP ((char)1)
+#define KEY_DOWN ((char)2)
 static int kbd_count;
 
 static void ps2_lock(unsigned long *flags) {
@@ -299,10 +318,35 @@ static void ps2_apply(void) {
     kbd_count = 0;
     ps2_unlock(flags);
     for (int i = 0; i < count; i++) {
-        if ((bytes[i] & 0x80) != 0) {
+        unsigned char b = bytes[i];
+        if (b == 0xe0) {
+            kbd_e0 = 1;
             continue;
         }
-        char ch = decode_set1(bytes[i]);
+        if (kbd_e0) {
+            /* Extended keys: only arrow up/down (shell history) for now. */
+            kbd_e0 = 0;
+            if ((b == 0x48 || b == 0x50) && !desktop_active()) {
+                shell_input(b == 0x48 ? KEY_UP : KEY_DOWN);
+            }
+            continue;
+        }
+        if (b == 0x2a || b == 0x36) {
+            kbd_shift = 1;
+            continue;
+        }
+        if (b == 0xaa || b == 0xb6) {
+            kbd_shift = 0;
+            continue;
+        }
+        if (b == 0x3a) {
+            kbd_caps ^= 1;
+            continue;
+        }
+        if ((b & 0x80) != 0) {
+            continue;
+        }
+        char ch = decode_set1(b, kbd_shift, kbd_caps);
         if (ch == 0) {
             continue;
         }
@@ -377,7 +421,20 @@ static char program_text[64];
 static int program_len = 0;
 static int program_capture = 0;
 
+enum { SH_OUT = 4096 };
+static char sh_bufs[2][SH_OUT];
+static char *cap_buf;
+static unsigned int cap_len;
+static int cap_on;
+
 void console_putc(char ch) {
+    if (cap_on && task_current() == 0) {
+        /* Shell pipe or redirect: collect output instead of printing it. */
+        if (cap_len < SH_OUT) {
+            cap_buf[cap_len++] = ch;
+        }
+        return;
+    }
     serial_putc(ch);
     if (!desktop_active()) {
         screen_putc(ch);
@@ -398,7 +455,7 @@ void console_puts(const char *text) {
     ps2_unlock(flags);
 }
 
-enum { LINE_MAX = 72 };
+enum { LINE_MAX = 128 };
 
 static char line[LINE_MAX];
 static int line_len = 0;
@@ -1035,6 +1092,7 @@ static void execute(char *input) {
     }
     if (str_eq(input, "help")) {
         console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
+        console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -1130,16 +1188,585 @@ static void prompt(void) {
     console_puts("genesis> ");
 }
 
+/* ---- developer shell: tokens, variables, pipes, redirects, scripts ---- */
+enum { SH_TOK = 32, SH_STAGES = 4, SH_VARS = 16, SH_VNAME = 16, SH_VVAL = 64, SH_HIST = 16 };
+enum { T_WORD, T_PIPE, T_SEMI, T_AMP, T_GT, T_GTGT };
+
+struct sh_tok {
+    int type;
+    char *s;
+};
+
+static char var_names[SH_VARS][SH_VNAME];
+static char var_vals[SH_VARS][SH_VVAL];
+static const char *sh_in;
+static unsigned int sh_in_len;
+static int sh_has_in;
+static int sh_depth;
+
+static int is_name_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int name_eq_n(const char *stored, const char *name, unsigned int n) {
+    for (unsigned int i = 0; i < n; i++) {
+        if (stored[i] != name[i]) {
+            return 0;
+        }
+    }
+    return stored[n] == 0;
+}
+
+static const char *var_get(const char *name, unsigned int n) {
+    for (int i = 0; i < SH_VARS; i++) {
+        if (var_names[i][0] != 0 && name_eq_n(var_names[i], name, n)) {
+            return var_vals[i];
+        }
+    }
+    return "";
+}
+
+static int var_set(const char *name, unsigned int n, const char *value) {
+    int slot = -1;
+    if (n == 0 || n >= SH_VNAME) {
+        return 0;
+    }
+    for (int i = 0; i < SH_VARS; i++) {
+        if (var_names[i][0] != 0 && name_eq_n(var_names[i], name, n)) {
+            slot = i;
+            break;
+        }
+        if (var_names[i][0] == 0 && slot < 0) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        return 0;
+    }
+    for (unsigned int i = 0; i < n; i++) {
+        var_names[slot][i] = name[i];
+    }
+    var_names[slot][n] = 0;
+    unsigned int k = 0;
+    while (value[k] != 0 && k + 1 < SH_VVAL) {
+        var_vals[slot][k] = value[k];
+        k++;
+    }
+    var_vals[slot][k] = 0;
+    return 1;
+}
+
+/* One statement (up to ; or &), so $VAR sees earlier assignments.
+ * Returns token count, -1 if too long, -2 on an unclosed quote. */
+static int sh_tokenize(const char **src, struct sh_tok *toks, char *store, unsigned int cap) {
+    const char *p = *src;
+    int n = 0;
+    unsigned int used = 0;
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\r') {
+            p++;
+        }
+        if (*p == 0 || *p == '#') {
+            *src = 0;
+            return n;
+        }
+        if (n >= SH_TOK) {
+            return -1;
+        }
+        toks[n].s = 0;
+        if (*p == '|' || *p == ';' || *p == '&') {
+            toks[n++].type = *p == '|' ? T_PIPE : *p == ';' ? T_SEMI : T_AMP;
+            p++;
+            if (toks[n - 1].type != T_PIPE) {
+                *src = p;
+                return n;
+            }
+            continue;
+        }
+        if (*p == '>') {
+            p++;
+            toks[n].type = T_GT;
+            if (*p == '>') {
+                toks[n].type = T_GTGT;
+                p++;
+            }
+            n++;
+            continue;
+        }
+        char *word = store + used;
+        char quote = 0;
+        while (*p != 0) {
+            char c = *p;
+            if (!quote && (c == ' ' || c == '\t' || c == '\r' || c == '|' || c == ';' || c == '&' || c == '>')) {
+                break;
+            }
+            if (!quote && (c == '"' || c == '\'')) {
+                quote = c;
+                p++;
+                continue;
+            }
+            if (quote && c == quote) {
+                quote = 0;
+                p++;
+                continue;
+            }
+            if (c == '$' && quote != '\'' && is_name_ch(p[1])) {
+                const char *name = ++p;
+                unsigned int k = 0;
+                while (is_name_ch(name[k])) {
+                    k++;
+                }
+                const char *value = var_get(name, k);
+                p += k;
+                while (*value != 0) {
+                    if (used + 1 >= cap) {
+                        return -1;
+                    }
+                    store[used++] = *value++;
+                }
+                continue;
+            }
+            if (used + 1 >= cap) {
+                return -1;
+            }
+            store[used++] = c;
+            p++;
+        }
+        if (quote) {
+            return -2;
+        }
+        if (used + 1 >= cap) {
+            return -1;
+        }
+        store[used++] = 0;
+        toks[n].type = T_WORD;
+        toks[n].s = word;
+        n++;
+    }
+}
+
+/* Input for a filter: the pipe if there is one, else the named file. */
+static int sh_input(const char *file, const char *who, const char **data, unsigned int *len) {
+    if (sh_has_in) {
+        *data = sh_in;
+        *len = sh_in_len;
+        return 1;
+    }
+    struct ram_file *f = file ? fs_find(file) : 0;
+    if (f == 0) {
+        console_puts(who);
+        console_puts(file ? ": no such file\n" : ": no input\n");
+        return 0;
+    }
+    *data = (const char *)f->data;
+    *len = f->length;
+    return 1;
+}
+
+static int line_has(const char *line, unsigned int len, const char *word) {
+    unsigned int w = 0;
+    while (word[w] != 0) {
+        w++;
+    }
+    if (w == 0) {
+        return 1;
+    }
+    for (unsigned int i = 0; i + w <= len; i++) {
+        unsigned int k = 0;
+        while (k < w && line[i + k] == word[k]) {
+            k++;
+        }
+        if (k == w) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void put_n(const char *text, unsigned int len) {
+    for (unsigned int i = 0; i < len; i++) {
+        console_putc(text[i]);
+    }
+}
+
+static void sh_grep(char **argv, int argc) {
+    const char *data;
+    unsigned int len;
+    if (argc < 2) {
+        console_puts("grep: need a word\n");
+        return;
+    }
+    if (!sh_input(argc > 2 ? argv[2] : 0, "grep", &data, &len)) {
+        return;
+    }
+    unsigned int start = 0;
+    for (unsigned int i = 0; i <= len; i++) {
+        if (i == len || data[i] == '\n') {
+            if (i > start && line_has(data + start, i - start, argv[1])) {
+                put_n(data + start, i - start);
+                console_putc('\n');
+            }
+            start = i + 1;
+        }
+    }
+}
+
+static void sh_wc(char **argv, int argc) {
+    const char *data;
+    unsigned int len;
+    if (!sh_input(argc > 1 ? argv[1] : 0, "wc", &data, &len)) {
+        return;
+    }
+    unsigned int lines = 0, words = 0;
+    int in_word = 0;
+    for (unsigned int i = 0; i < len; i++) {
+        char c = data[i];
+        if (c == '\n') {
+            lines++;
+        }
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+            in_word = 0;
+        } else if (!in_word) {
+            in_word = 1;
+            words++;
+        }
+    }
+    if (len > 0 && data[len - 1] != '\n') {
+        lines++;
+    }
+    print_u32(lines);
+    console_putc(' ');
+    print_u32(words);
+    console_putc(' ');
+    print_u32(len);
+    console_putc('\n');
+}
+
+static void sh_head(char **argv, int argc) {
+    const char *data;
+    unsigned int len;
+    unsigned int count = 10;
+    int arg = 1;
+    if (argc > 1 && parse_u32(argv[1], &count)) {
+        arg = 2;
+    }
+    if (!sh_input(argc > arg ? argv[arg] : 0, "head", &data, &len)) {
+        return;
+    }
+    unsigned int i = 0;
+    while (i < len && count > 0) {
+        console_putc(data[i]);
+        if (data[i] == '\n') {
+            count--;
+        }
+        i++;
+    }
+    if (i > 0 && data[i - 1] != '\n') {
+        console_putc('\n');
+    }
+}
+
+static void sh_run_line(const char *src);
+
+static void sh_script(const char *name) {
+    struct ram_file *f = fs_find(name);
+    if (f == 0) {
+        console_puts("sh: no such file\n");
+        return;
+    }
+    if (sh_depth >= 4) {
+        console_puts("sh: too deep\n");
+        return;
+    }
+    sh_depth++;
+    char buf[LINE_MAX];
+    unsigned int n = 0;
+    for (unsigned int i = 0; i <= f->length; i++) {
+        if (i == f->length || f->data[i] == '\n') {
+            buf[n] = 0;
+            sh_run_line(buf);
+            n = 0;
+            f = fs_find(name);
+            if (f == 0) {
+                break;
+            }
+            continue;
+        }
+        if (n + 1 < LINE_MAX) {
+            buf[n++] = (char)f->data[i];
+        }
+    }
+    sh_depth--;
+}
+
+static void sh_set(void) {
+    for (int i = 0; i < SH_VARS; i++) {
+        if (var_names[i][0] != 0) {
+            console_puts(var_names[i]);
+            console_putc('=');
+            console_puts(var_vals[i]);
+            console_putc('\n');
+        }
+    }
+}
+
+static void sh_command(char **argv, int argc) {
+    if (argc == 0) {
+        return;
+    }
+    const char *eq = argv[0];
+    while (is_name_ch(*eq)) {
+        eq++;
+    }
+    if (*eq == '=' && eq != argv[0] && !(argv[0][0] >= '0' && argv[0][0] <= '9')) {
+        if (!var_set(argv[0], (unsigned int)(eq - argv[0]), eq + 1)) {
+            console_puts("sh: too many variables\n");
+        }
+        return;
+    }
+    if (str_eq(argv[0], "grep")) {
+        sh_grep(argv, argc);
+        return;
+    }
+    if (str_eq(argv[0], "wc")) {
+        sh_wc(argv, argc);
+        return;
+    }
+    if (str_eq(argv[0], "head")) {
+        sh_head(argv, argc);
+        return;
+    }
+    if (str_eq(argv[0], "set")) {
+        sh_set();
+        return;
+    }
+    if (str_eq(argv[0], "sh")) {
+        if (argc < 2) {
+            console_puts("sh: need a file\n");
+            return;
+        }
+        sh_script(argv[1]);
+        return;
+    }
+    if (sh_has_in && str_eq(argv[0], "cat") && argc == 1) {
+        put_n(sh_in, sh_in_len);
+        return;
+    }
+    /* Everything else: the classic one-line commands. */
+    char cmd[LINE_MAX * 2];
+    unsigned int n = 0;
+    for (int i = 0; i < argc; i++) {
+        for (const char *s = argv[i]; *s != 0 && n + 2 < sizeof cmd; s++) {
+            cmd[n++] = *s;
+        }
+        if (i + 1 < argc && n + 2 < sizeof cmd) {
+            cmd[n++] = ' ';
+        }
+    }
+    cmd[n] = 0;
+    execute(cmd);
+}
+
+static void sh_write_file(const char *name, const char *data, unsigned int len, int append) {
+    unsigned int total = 0;
+    struct ram_file *old = append ? fs_find(name) : 0;
+    if (old != 0) {
+        for (; total < old->length && total < FS_DATA; total++) {
+            edit_buf[total] = (char)old->data[total];
+        }
+    }
+    for (unsigned int i = 0; i < len && total < FS_DATA; i++) {
+        edit_buf[total++] = data[i];
+    }
+    if (!fs_add(name, edit_buf, total)) {
+        console_puts("sh: cannot write file\n");
+        return;
+    }
+    if (!disk_save()) {
+        console_puts("disk: io failed\n");
+    }
+}
+
+static void sh_statement(struct sh_tok *t, int n, int background) {
+    char *argv[SH_STAGES][SH_TOK];
+    int argc[SH_STAGES];
+    int stages = 1;
+    char *redir = 0;
+    int append = 0;
+    if (n == 0) {
+        return;
+    }
+    argc[0] = 0;
+    for (int i = 0; i < n; i++) {
+        if (t[i].type == T_PIPE) {
+            if (argc[stages - 1] == 0 || stages >= SH_STAGES) {
+                console_puts("sh: bad pipe\n");
+                return;
+            }
+            argc[stages++] = 0;
+        } else if (t[i].type == T_GT || t[i].type == T_GTGT) {
+            if (i + 1 >= n || t[i + 1].type != T_WORD) {
+                console_puts("sh: need a file after >\n");
+                return;
+            }
+            append = t[i].type == T_GTGT;
+            redir = t[++i].s;
+        } else {
+            argv[stages - 1][argc[stages - 1]++] = t[i].s;
+        }
+    }
+    if (argc[stages - 1] == 0) {
+        console_puts("sh: bad pipe\n");
+        return;
+    }
+    if (background) {
+        /* `ticker &` or `run ticker &`: a program from disk as a task. */
+        char **a = argv[0];
+        if (stages == 1 && redir == 0 && argc[0] == 1) {
+            cmd_run(a[0], 1);
+        } else if (stages == 1 && redir == 0 && argc[0] == 2 && (str_eq(a[0], "run") || str_eq(a[0], "spawn"))) {
+            cmd_run(a[1], 1);
+        } else {
+            console_puts("sh: only a program can run with &\n");
+        }
+        return;
+    }
+    int outer_on = cap_on;
+    char *outer_buf = cap_buf;
+    unsigned int outer_len = cap_len;
+    const char *in = 0;
+    unsigned int in_len = 0;
+    int has_in = 0;
+    int which = 0;
+    for (int s = 0; s < stages; s++) {
+        int capture = s + 1 < stages || redir != 0;
+        if (capture) {
+            cap_buf = sh_bufs[which];
+            cap_len = 0;
+            cap_on = 1;
+        } else {
+            cap_on = outer_on;
+            cap_buf = outer_buf;
+            cap_len = outer_len;
+        }
+        sh_in = in;
+        sh_in_len = in_len;
+        sh_has_in = has_in;
+        sh_command(argv[s], argc[s]);
+        sh_has_in = 0;
+        if (capture) {
+            in = sh_bufs[which];
+            in_len = cap_len;
+            has_in = 1;
+            which ^= 1;
+        } else {
+            outer_len = cap_len;
+        }
+    }
+    cap_on = outer_on;
+    cap_buf = outer_buf;
+    cap_len = outer_len;
+    if (redir != 0) {
+        sh_write_file(redir, in, in_len, append);
+    }
+}
+
+static void sh_run_line(const char *src) {
+    struct sh_tok toks[SH_TOK];
+    char store[LINE_MAX * 2];
+    while (src != 0) {
+        int n = sh_tokenize(&src, toks, store, sizeof store);
+        if (n == -2) {
+            console_puts("sh: unclosed quote\n");
+            return;
+        }
+        if (n < 0) {
+            console_puts("sh: line too long\n");
+            return;
+        }
+        int amp = n > 0 && toks[n - 1].type == T_AMP;
+        if (n > 0 && (toks[n - 1].type == T_SEMI || amp)) {
+            n--;
+        }
+        sh_statement(toks, n, amp);
+    }
+}
+
+static char hist[SH_HIST][LINE_MAX];
+static int hist_count;
+static int hist_pos;
+
+static void line_erase(void) {
+    while (line_len > 0) {
+        line_len--;
+        screen_putc('\b');
+        serial_putc('\b');
+        serial_putc(' ');
+        serial_putc('\b');
+    }
+}
+
+static void line_load(const char *text) {
+    line_erase();
+    while (*text != 0 && line_len + 1 < LINE_MAX) {
+        line[line_len++] = *text;
+        console_putc(*text++);
+    }
+}
+
+static void hist_push(const char *text) {
+    if (text[0] == 0) {
+        return;
+    }
+    if (hist_count == SH_HIST) {
+        for (int i = 1; i < SH_HIST; i++) {
+            for (int k = 0; k < LINE_MAX; k++) {
+                hist[i - 1][k] = hist[i][k];
+            }
+        }
+        hist_count--;
+    }
+    int k = 0;
+    while (text[k] != 0 && k + 1 < LINE_MAX) {
+        hist[hist_count][k] = text[k];
+        k++;
+    }
+    hist[hist_count][k] = 0;
+    hist_count++;
+}
+
 static void shell_input(char ch) {
     if (editing) {
-        edit_input(ch);
+        if (ch != KEY_UP && ch != KEY_DOWN) {
+            edit_input(ch);
+        }
+        return;
+    }
+    if (ch == KEY_UP) {
+        if (hist_pos > 0) {
+            hist_pos--;
+            line_load(hist[hist_pos]);
+        }
+        return;
+    }
+    if (ch == KEY_DOWN) {
+        if (hist_pos < hist_count) {
+            hist_pos++;
+            line_load(hist_pos < hist_count ? hist[hist_pos] : "");
+        }
         return;
     }
     if (ch == '\n') {
         console_putc('\n');
         line[line_len] = 0;
-        execute(line);
+        hist_push(line);
+        hist_pos = hist_count;
         line_len = 0;
+        char copy[LINE_MAX];
+        for (int i = 0; i < LINE_MAX; i++) {
+            copy[i] = line[i];
+        }
+        sh_run_line(copy);
         if (!editing) {
             prompt();
         }
