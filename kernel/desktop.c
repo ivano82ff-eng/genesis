@@ -858,8 +858,11 @@ static void publish_clock(void) {
 
 void timer_tick(void) {
     ps2_drain();
-    clock_ticks++;
     outb(0x20, 0x20);
+    if (!desktop_on) {
+        return; /* the PIT also drives the scheduler; the clock is a desktop thing */
+    }
+    clock_ticks++;
     if (clock_ticks < 100) {
         return;
     }
@@ -880,7 +883,12 @@ unsigned int clock_read(void) {
     return clock_seconds;
 }
 
-static void timer_start(void) {
+void timer_start(void) {
+    static int started;
+    if (started) {
+        return;
+    }
+    started = 1;
     for (int i = 0; i < 256; i++) {
         idt[i].type_attr = 0;
     }
