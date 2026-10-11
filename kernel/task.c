@@ -7,7 +7,9 @@ void console_putc(char ch);
 
 typedef void (*print_fn)(const char *);
 typedef void (*sleep_fn)(unsigned int ticks);
-typedef void (*task_fn)(print_fn print, sleep_fn sleep);
+void *pkg_sym(const char *lib, const char *sym);
+typedef void *(*pkg_sym_fn)(const char *lib, const char *sym);
+typedef void (*task_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
 enum { TASK_MAX = 4, TASK_STACK = 16384, FRAME_REGS = 15 };
 enum { TASK_FREE = 0, TASK_READY, TASK_DEAD };
@@ -82,7 +84,7 @@ static void print_u(unsigned int value) {
 
 static __attribute__((noreturn)) void task_start(void) {
     int self = current;
-    tasks[self].entry(console_puts, task_sleep);
+    tasks[self].entry(console_puts, task_sleep, pkg_sym);
     console_puts("\ntask ");
     print_u((unsigned int)self);
     console_puts(" done\n");

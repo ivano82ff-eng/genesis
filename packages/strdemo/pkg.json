@@ -1,0 +1,1 @@
+{ "name": "strdemo", "version": "1.0", "deps": ["strlib"], "description": "example program using strlib and mathlib" }

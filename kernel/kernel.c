@@ -648,6 +648,10 @@ static void *heap_alloc(unsigned int size) {
     return HEAP + start;
 }
 
+void *kheap_alloc(unsigned int size) {
+    return heap_alloc(size);
+}
+
 static void cmd_mem(void) {
     console_puts("usable ");
     print_u32((unsigned int)(usable_bytes >> 20));
@@ -986,6 +990,25 @@ static int fs_remove(const char *name) {
     return 0;
 }
 
+int fs_delete(const char *name) {
+    if (fs_find(name) == 0) {
+        return 0;
+    }
+    fs_remove(name);
+    grid_unlink(name);
+    return 1;
+}
+
+int fs_free_slots(void) {
+    int n = 0;
+    for (int i = 0; i < FS_MAX; i++) {
+        if (!ramfs[i].used) {
+            n++;
+        }
+    }
+    return n;
+}
+
 static void cmd_rm(const char *name) {
     if (name[0] == 0 || fs_find(name) == 0) {
         console_puts("rm: no such file\n");
@@ -1000,7 +1023,10 @@ static void cmd_rm(const char *name) {
 
 typedef void (*print_fn)(const char *);
 typedef void (*sleep_fn)(unsigned int ticks);
-typedef void (*prog_fn)(print_fn print, sleep_fn sleep);
+typedef void *(*pkg_sym_fn)(const char *lib, const char *sym);
+void *pkg_sym(const char *lib, const char *sym);
+void cmd_pkg(const char *args);
+typedef void (*prog_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
 /* background: start the program as a task (`spawn NAME`) and return. */
 static void cmd_run(const char *name, int background) {
@@ -1034,7 +1060,7 @@ static void cmd_run(const char *name, int background) {
     /* Programs are machine code run in ring 0: no isolation, a bad program
      * can hang the whole kernel. Fine for a demo, not a userspace. */
     prog_fn program = (prog_fn)(void *)dest;
-    program(console_puts, task_sleep);
+    program(console_puts, task_sleep, pkg_sym);
     program_capture = 0;
     console_putc('\n');
 }
@@ -1110,6 +1136,7 @@ static void execute(char *input) {
     if (str_eq(input, "help")) {
         console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
+        console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -1161,6 +1188,10 @@ static void execute(char *input) {
     }
     if (str_eq(input, "spawn") || starts_with(input, "spawn ")) {
         cmd_run(input[5] == ' ' ? input + 6 : "", 1);
+        return;
+    }
+    if (str_eq(input, "pkg") || starts_with(input, "pkg ")) {
+        cmd_pkg(input[3] == ' ' ? input + 4 : "");
         return;
     }
     if (str_eq(input, "ps")) {
