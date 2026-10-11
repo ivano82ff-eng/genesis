@@ -21,7 +21,7 @@
  */
 
 enum { ATA_DATA = 0x1f0, ATA_SECCNT = 0x1f2, ATA_LBA0 = 0x1f3, ATA_LBA1 = 0x1f4, ATA_LBA2 = 0x1f5, ATA_DRIVE = 0x1f6, ATA_STATUS = 0x1f7 };
-enum { FS_HEADER_LBA = 32, FS_BITMAP_LBA = 33, FS_DIR_LBA = 34, FS_DATA_LBA = 2048, FS_FLAG_HOME = 1 };
+enum { FS_HEADER_LBA = 32, FS_BITMAP_LBA = 33, FS_DIR_LBA = 34, FS_DATA_LBA = 2048, FS_FLAG_HOME = 1, FS_FLAG_SEED = 2 };
 enum { GRID_BLOCK_SIZE = 4096, GRID_SECTORS_PER_BLOCK = 8, GRID_CHUNKS = 16, GRID_NO_CHUNK = 0xFFFFFFFFu };
 enum { GRID_ENTRY_BYTES = 84, GRID_BITMAP_SECTORS = 1, GRID_DIR_SECTORS = 4 };
 enum { GRID_MAX_BLOCKS = GRID_BITMAP_SECTORS * 512u * 8u };
@@ -445,6 +445,15 @@ int disk_consume_home(void) {
     }
     boot_flags = (unsigned char)(boot_flags & (unsigned char)~FS_FLAG_HOME);
     return disk_save();
+}
+
+/* Set by the host importer (src/import.ts); cleared by the next save. */
+int disk_consume_seed(void) {
+    if ((boot_flags & FS_FLAG_SEED) == 0) {
+        return 0;
+    }
+    boot_flags = (unsigned char)(boot_flags & (unsigned char)~FS_FLAG_SEED);
+    return 1;
 }
 
 int disk_save(void) {

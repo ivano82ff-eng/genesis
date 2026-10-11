@@ -9,7 +9,7 @@ export function delay(ms: number): Promise<void> {
 /** Type a line into the guest shell, one key at a time. */
 export async function typeLine(guest: Guest, text: string): Promise<void> {
   for (const ch of text) {
-    const key = ch === " " ? "spc" : ch === "-" ? "minus" : ch;
+    const key = ch === " " ? "spc" : ch === "-" ? "minus" : ch === "." ? "dot" : ch;
     await guest.sendKey(key);
     await delay(35);
   }

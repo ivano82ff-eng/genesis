@@ -25,6 +25,7 @@ int disk_save(void);
 int install_system(void);
 void disk_request_home(void);
 int disk_consume_home(void);
+int disk_consume_seed(void);
 int grid_unlink(const char *name);
 void machine_poweroff(void);
 void machine_reboot(void);
@@ -672,12 +673,20 @@ extern const unsigned char sample_note_pdf_end[];
 extern const unsigned char sample_clip_mp4[];
 extern const unsigned char sample_clip_mp4_end[];
 
+/* Set while refreshing an existing disk: add built-in files only where missing. */
+static int seed_only_missing;
+
 static void fs_seed_blob(const char *name, const unsigned char *start, const unsigned char *end) {
+    if (seed_only_missing && fs_find(name)) {
+        return;
+    }
     fs_add(name, (const char *)start, (unsigned int)(end - start));
 }
 
 static void fs_seed(void) {
-    fs_add("readme", "welcome to genesis", 18);
+    if (!seed_only_missing || !fs_find("readme")) {
+        fs_add("readme", "welcome to genesis", 18);
+    }
     fs_seed_blob("hello", hello_bin, hello_bin_end);
     fs_seed_blob("open", open_bin, open_bin_end);
     fs_seed_blob("vtxt", vtxt_bin, vtxt_bin_end);
@@ -1182,6 +1191,12 @@ __attribute__((noreturn)) void kmain(unsigned int mb_info) {
         if (!disk_save()) {
             serial_puts("disk: io failed\n");
         }
+    } else if (disk_consume_seed()) {
+        /* Host imported files (npm run look): restore any missing built-ins. */
+        seed_only_missing = 1;
+        fs_seed();
+        seed_only_missing = 0;
+        disk_save();
     }
     if (mb_info >= 8) {
         install_system();

@@ -2,6 +2,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pickQemu, startGuest } from "./guest.js";
+import { importFolder, reportImport } from "./import.js";
 import { ppmToPng } from "./png.js";
 import { delay, typeLine } from "./typing.js";
 import {
@@ -88,6 +89,9 @@ async function show(timeoutMs: number): Promise<void> {
   }
   const image = await buildImage();
   const disk = path.join(repoRoot(), "build", "genesis-disk.img");
+  await mkdir(path.dirname(disk), { recursive: true });
+  // Files from import/ go onto the genesis disk before QEMU starts.
+  reportImport(await importFolder(disk, path.join(repoRoot(), "import")));
   const guest = await startGuest({
     isoPath: image.isoPath,
     display: "gtk",
