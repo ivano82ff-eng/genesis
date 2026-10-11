@@ -1,8 +1,6 @@
 #include "api.h"
 
-enum { HEAP_BYTES = 256u * 1024u };
-
-static unsigned char prog_heap[HEAP_BYTES];
+static unsigned char prog_heap[GENESIS_PROG_HEAP];
 static unsigned int prog_used;
 
 void *prog_malloc(unsigned int size) {
@@ -10,7 +8,7 @@ void *prog_malloc(unsigned int size) {
         size = 1;
     }
     size = (size + 15u) & ~15u;
-    if (size > HEAP_BYTES - prog_used) {
+    if (size > GENESIS_PROG_HEAP - prog_used) {
         return 0;
     }
     void *block = prog_heap + prog_used;
