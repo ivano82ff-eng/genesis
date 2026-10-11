@@ -41,6 +41,8 @@ int task_spawn(const char *name, void *code);
 void task_sleep(unsigned int ticks);
 void cmd_ps(void);
 
+#include "editor.h"
+
 static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
 
 static void vga_hide_cursor(void) {
@@ -243,6 +245,7 @@ static unsigned char kbd_bytes[KBD_RING];
 static int kbd_shift;
 static int kbd_caps;
 static int kbd_e0;
+static int kbd_ctrl;
 #define KEY_UP ((char)1)
 #define KEY_DOWN ((char)2)
 static int kbd_count;
@@ -324,8 +327,31 @@ static void ps2_apply(void) {
             continue;
         }
         if (kbd_e0) {
-            /* Extended keys: only arrow up/down (shell history) for now. */
             kbd_e0 = 0;
+            if (b == 0x1d || b == 0x9d) {
+                kbd_ctrl = b == 0x1d;
+                continue;
+            }
+            if (editor_active()) {
+                int key = 0;
+                switch (b) {
+                case 0x48: key = ED_UP; break;
+                case 0x50: key = ED_DOWN; break;
+                case 0x4b: key = ED_LEFT; break;
+                case 0x4d: key = ED_RIGHT; break;
+                case 0x47: key = ED_HOME; break;
+                case 0x4f: key = ED_END; break;
+                case 0x49: key = ED_PGUP; break;
+                case 0x51: key = ED_PGDN; break;
+                case 0x53: key = ED_DELETE; break;
+                default: break;
+                }
+                if (key != 0) {
+                    editor_key(key);
+                }
+                continue;
+            }
+            /* Outside the editor: arrow up/down drive shell history. */
             if ((b == 0x48 || b == 0x50) && !desktop_active()) {
                 shell_input(b == 0x48 ? KEY_UP : KEY_DOWN);
             }
@@ -343,11 +369,29 @@ static void ps2_apply(void) {
             kbd_caps ^= 1;
             continue;
         }
+        if (b == 0x1d || b == 0x9d) {
+            kbd_ctrl = b == 0x1d;
+            continue;
+        }
+        if (editor_active() && (b == 0x01 || b == 0x0f)) {
+            editor_key(b == 0x01 ? ED_QUIT : ED_TAB);
+            continue;
+        }
         if ((b & 0x80) != 0) {
             continue;
         }
         char ch = decode_set1(b, kbd_shift, kbd_caps);
         if (ch == 0) {
+            continue;
+        }
+        if (editor_active()) {
+            if (kbd_ctrl && (ch == 's' || ch == 'S')) {
+                editor_key(ED_SAVE);
+            } else if (kbd_ctrl && (ch == 'q' || ch == 'Q')) {
+                editor_key(ED_QUIT);
+            } else if (!kbd_ctrl) {
+                editor_key((unsigned char)ch);
+            }
             continue;
         }
         if (desktop_active()) {
@@ -436,7 +480,7 @@ void console_putc(char ch) {
         return;
     }
     serial_putc(ch);
-    if (!desktop_active()) {
+    if (!desktop_active() && !editor_active()) {
         screen_putc(ch);
     }
     if (program_capture && ch != '\n' && program_len + 1 < (int)sizeof program_text) {
@@ -870,62 +914,35 @@ static void cmd_cat(const char *name) {
     console_putc('\n');
 }
 
-static int editing;
-static char edit_name[FS_NAME];
+/* Scratch buffer for appends (>>), one Grid Store file in size. */
 static char edit_buf[FS_DATA];
-static unsigned int edit_len;
 
 static void prompt(void);
 
-static void cmd_edit(const char *name) {
+int fs_get(const char *name, const unsigned char **data, unsigned int *length) {
     struct ram_file *file = fs_find(name);
-    if (file == 0 || name[0] == 0) {
-        console_puts("edit: no such file\n");
-        return;
+    if (file == 0) {
+        return 0;
     }
-    unsigned int n = 0;
-    while (name[n] != 0 && n + 1 < FS_NAME) {
-        edit_name[n] = name[n];
-        n++;
-    }
-    edit_name[n] = 0;
-    edit_len = 0;
-    editing = 1;
-    console_puts("edit: ");
-    for (unsigned int i = 0; i < file->length; i++) {
-        console_putc(file->data[i]);
-    }
-    console_putc('\n');
+    *data = file->data;
+    *length = file->length;
+    return 1;
 }
 
-static void edit_input(char ch) {
-    if (ch == '\n') {
-        console_putc('\n');
-        if (!fs_add(edit_name, edit_buf, edit_len) || !disk_save()) {
-            console_puts("edit: failed\n");
-        } else {
-            console_puts("edit: saved\n");
-        }
-        editing = 0;
-        edit_len = 0;
-        prompt();
-        return;
-    }
-    if (ch == '\b') {
-        if (edit_len > 0) {
-            edit_len--;
-            screen_putc('\b');
-            serial_putc('\b');
-            serial_putc(' ');
-            serial_putc('\b');
-        }
-        return;
-    }
-    if (edit_len + 1 >= FS_DATA) {
-        return;
-    }
-    edit_buf[edit_len++] = ch;
-    console_putc(ch);
+int fs_put(const char *name, const char *data, unsigned int length) {
+    return fs_add(name, data, length) && disk_save();
+}
+
+void editor_closed(void) {
+    vga_hide_cursor();
+    vga_clear();
+    type_row = 0;
+    type_col = 0;
+    prompt();
+}
+
+static void cmd_edit(const char *name) {
+    editor_open(name);
 }
 
 static void cmd_write(const char *args) {
@@ -1736,12 +1753,6 @@ static void hist_push(const char *text) {
 }
 
 static void shell_input(char ch) {
-    if (editing) {
-        if (ch != KEY_UP && ch != KEY_DOWN) {
-            edit_input(ch);
-        }
-        return;
-    }
     if (ch == KEY_UP) {
         if (hist_pos > 0) {
             hist_pos--;
@@ -1767,7 +1778,7 @@ static void shell_input(char ch) {
             copy[i] = line[i];
         }
         sh_run_line(copy);
-        if (!editing) {
+        if (!editor_active()) {
             prompt();
         }
         return;
