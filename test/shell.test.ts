@@ -24,7 +24,7 @@ test(
     }
 
     const image = await buildImage();
-    const guest = await startGuest({ isoPath: image.isoPath, display: "gtk" });
+    const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
       await guest.waitForSerial(PROMPT, DEFAULT_TIMEOUT_MS);
       assert.match(guest.serial, new RegExp(BOOT_MARKER));

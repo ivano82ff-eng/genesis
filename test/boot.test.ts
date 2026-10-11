@@ -33,7 +33,7 @@ test(
       result.markerFound,
       true,
       [
-        `в serial нет строки «${BOOT_MARKER}»`,
+        `? serial ??? ?????? ?${BOOT_MARKER}?`,
         `timeout=${result.timedOut} qemuExit=${result.qemuExitCode}`,
         "--- serial ---",
         result.serial,
@@ -54,7 +54,7 @@ test(
     }
 
     const image = await buildImage();
-    const guest = await startGuest({ isoPath: image.isoPath, display: "gtk" });
+    const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
       await guest.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
       const ppm = await guest.screendump();
@@ -76,7 +76,7 @@ test(
     }
 
     const image = await buildImage();
-    const guest = await startGuest({ isoPath: image.isoPath, display: "gtk" });
+    const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
       await guest.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
       await delay(100);
