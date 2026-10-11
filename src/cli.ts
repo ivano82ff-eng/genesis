@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { startGuest } from "./guest.js";
+import { pickQemu, startGuest } from "./guest.js";
 import { ppmToPng } from "./png.js";
 import { delay, typeLine } from "./typing.js";
 import {
@@ -77,15 +77,21 @@ async function boot(timeoutMs: number): Promise<void> {
 }
 
 async function show(timeoutMs: number): Promise<void> {
-  const missing = missingTools(["qemu-system-x86_64"]);
-  if (missing.length > 0) {
-    throw hostToolError(missing);
+  const qemuBin = pickQemu("gtk");
+  if (qemuBin === "qemu-system-x86_64") {
+    const missing = missingTools(["qemu-system-x86_64"]);
+    if (missing.length > 0) {
+      throw hostToolError(missing);
+    }
+  } else {
+    console.error(`QEMU: ${qemuBin}`);
   }
   const image = await buildImage();
   const disk = path.join(repoRoot(), "build", "genesis-disk.img");
   const guest = await startGuest({
     isoPath: image.isoPath,
     display: "gtk",
+    qemuBin,
     diskPath: disk,
   });
   try {
