@@ -22,6 +22,49 @@ typedef void *(*lib_lookup_fn)(const char *sym, pkg_sym_fn import);
 
 enum { LINE_CAP = 160, TOK_MAX = 6, DEPTH_MAX = 8, CACHE_MAX = 8 };
 
+/* Installed files live in /lib (GLIB libraries) and /bin (programs). */
+static void pkg_path(char *out, const char *dir, const char *name) {
+    unsigned int n = 0;
+    while (*dir != 0) {
+        out[n++] = *dir++;
+    }
+    while (*name != 0 && n + 1 < FS_NAME) {
+        out[n++] = *name++;
+    }
+    out[n] = 0;
+}
+
+static int pkg_lib(const char *name, const unsigned char **data, unsigned int *length) {
+    char p[FS_NAME];
+    pkg_path(p, "/lib/", name);
+    return fs_get(p, data, length);
+}
+
+static int pkg_get(const char *name, const unsigned char **data, unsigned int *length) {
+    char p[FS_NAME];
+    if (pkg_lib(name, data, length)) {
+        return 1;
+    }
+    pkg_path(p, "/bin/", name);
+    return fs_get(p, data, length);
+}
+
+static int pkg_put(const char *name, const char *data, unsigned int length) {
+    char p[FS_NAME];
+    int lib = length >= 4 && data[0] == 'G' && data[1] == 'L' && data[2] == 'I' && data[3] == 'B';
+    pkg_path(p, lib ? "/lib/" : "/bin/", name);
+    return fs_put(p, data, length);
+}
+
+static void pkg_del(const char *name) {
+    char p[FS_NAME];
+    pkg_path(p, "/lib/", name);
+    if (!fs_delete(p)) {
+        pkg_path(p, "/bin/", name);
+        fs_delete(p);
+    }
+}
+
 static int s_eq(const char *a, const char *b) {
     while (*a != 0 && *a == *b) {
         a++;
@@ -150,7 +193,7 @@ static int pkg_missing(const char *name) {
             const unsigned char *data;
             unsigned int length;
             files++;
-            if (!fs_get(t[2], &data, &length)) {
+            if (!pkg_get(t[2], &data, &length)) {
                 missing++;
             }
         }
@@ -223,7 +266,7 @@ static int install_one(const char *name, int depth) {
     const unsigned char *blobs = blob_base();
     while (next_line(&pos, buf, t, &c)) {
         if (c >= 5 && t[0][0] == 'F' && s_eq(t[1], name)) {
-            if (!fs_put(t[2], (const char *)(blobs + s_num(t[3])), s_num(t[4]))) {
+            if (!pkg_put(t[2], (const char *)(blobs + s_num(t[3])), s_num(t[4]))) {
                 console_puts("pkg: cannot write ");
                 console_puts(t[2]);
                 console_putc('\n');
@@ -361,7 +404,7 @@ static void pkg_remove(const char *name) {
     pos = 0;
     while (next_line(&pos, buf, t, &c)) {
         if (c >= 5 && t[0][0] == 'F' && s_eq(t[1], name)) {
-            fs_delete(t[2]);
+            pkg_del(t[2]);
             cache_drop(t[2]);
         }
     }
@@ -414,7 +457,7 @@ static void cache_drop(const char *name) {
 void *pkg_sym(const char *lib, const char *sym) {
     const unsigned char *data;
     unsigned int length;
-    if (lib == 0 || sym == 0 || !fs_get(lib, &data, &length)) {
+    if (lib == 0 || sym == 0 || !pkg_lib(lib, &data, &length)) {
         if (lib != 0) {
             cache_drop(lib);
         }
