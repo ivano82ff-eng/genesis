@@ -34,6 +34,7 @@ test(
       await txt.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       assert.match(txt.serial, /Открыть/);
       await openRow(txt, 208, "txt: hello from note.txt");
+      await txt.waitForSerial("Привет из genesis — «ёж» №1", DEFAULT_TIMEOUT_MS);
     } finally {
       await txt.stop();
     }

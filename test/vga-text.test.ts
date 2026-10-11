@@ -12,4 +12,7 @@ test("decoder accepts the painted boot line and rejects a blank screen", () => {
   assert.match(missing, /столбец 0/);
   assert.equal(screenShowsChar(blank, "a"), false);
   assert.equal(screenShowsChar(paintTextPpm("a"), "a"), true);
+  assert.equal(screenShowsChar(paintTextPpm("Жж"), "ж"), true);
+  assert.equal(screenShowsChar(paintTextPpm("Жж"), "Я"), false);
+  assert.equal(screenTextError(paintTextPpm("мир"), "мир"), null);
 });

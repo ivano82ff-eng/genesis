@@ -1,4 +1,5 @@
 #include "font8x8.h"
+#include "utf8.h"
 
 #include "../programs/api.h"
 #include "fs_limits.h"
@@ -218,53 +219,6 @@ static void fill(int x, int y, int width, int height, unsigned int color) {
     }
 }
 
-static const unsigned char *cyr_rows(unsigned int code) {
-    static const struct {
-        unsigned int code;
-        unsigned char rows[8];
-    } table[] = {
-        {0x0412, {0x7c, 0x66, 0x66, 0x7c, 0x66, 0x66, 0x7c, 0x00}},
-        {0x0414, {0x3e, 0x66, 0x66, 0x66, 0x7e, 0xc3, 0xc3, 0x00}},
-        {0x041d, {0x66, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x66, 0x00}},
-        {0x041f, {0x7e, 0x7e, 0x66, 0x66, 0x66, 0x66, 0x66, 0x00}},
-        {0x0420, {0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60, 0x60, 0x00}},
-        {0x0424, {0x18, 0x7e, 0x66, 0x66, 0x7e, 0x18, 0x18, 0x00}},
-        {0x0417, {0x3c, 0x06, 0x1c, 0x06, 0x06, 0x3c, 0x00, 0x00}},
-        {0x0418, {0x66, 0x66, 0x76, 0x6e, 0x66, 0x66, 0x66, 0x00}},
-        {0x0430, {0x00, 0x00, 0x3c, 0x06, 0x3e, 0x66, 0x3e, 0x00}},
-        {0x0431, {0x7c, 0x60, 0x60, 0x7c, 0x66, 0x66, 0x7c, 0x00}},
-        {0x0432, {0x00, 0x00, 0x7c, 0x66, 0x7c, 0x66, 0x7c, 0x00}},
-        {0x0433, {0x00, 0x00, 0x7e, 0x60, 0x60, 0x60, 0x60, 0x00}},
-        {0x0434, {0x00, 0x00, 0x3e, 0x66, 0x66, 0x7e, 0xc3, 0x00}},
-        {0x0435, {0x00, 0x00, 0x3c, 0x66, 0x7e, 0x60, 0x3c, 0x00}},
-        {0x0436, {0x00, 0x00, 0x6b, 0x7f, 0x3e, 0x7f, 0x6b, 0x00}},
-        {0x0437, {0x00, 0x00, 0x3c, 0x06, 0x1c, 0x06, 0x3c, 0x00}},
-        {0x0438, {0x00, 0x00, 0x66, 0x66, 0x76, 0x6e, 0x66, 0x00}},
-        {0x0439, {0x1a, 0x00, 0x66, 0x66, 0x76, 0x6e, 0x66, 0x00}},
-        {0x043a, {0x00, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0x00}},
-        {0x043b, {0x00, 0x00, 0x1c, 0x36, 0x66, 0x66, 0x66, 0x00}},
-        {0x043c, {0x00, 0x00, 0x66, 0x7e, 0x7e, 0x66, 0x66, 0x00}},
-        {0x043d, {0x00, 0x00, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x00}},
-        {0x043e, {0x00, 0x00, 0x3c, 0x66, 0x66, 0x66, 0x3c, 0x00}},
-        {0x043f, {0x00, 0x00, 0x7e, 0x66, 0x66, 0x66, 0x66, 0x00}},
-        {0x0440, {0x00, 0x00, 0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60}},
-        {0x0441, {0x00, 0x00, 0x3c, 0x66, 0x60, 0x66, 0x3c, 0x00}},
-        {0x0442, {0x00, 0x00, 0x7e, 0x18, 0x18, 0x18, 0x18, 0x00}},
-        {0x0443, {0x00, 0x00, 0x66, 0x66, 0x3c, 0x18, 0x30, 0x00}},
-        {0x0447, {0x00, 0x00, 0x66, 0x66, 0x3e, 0x06, 0x06, 0x00}},
-        {0x044b, {0x00, 0x00, 0x60, 0x66, 0x7e, 0x66, 0x66, 0x00}},
-        {0x044c, {0x00, 0x00, 0x60, 0x60, 0x7c, 0x66, 0x7c, 0x00}},
-        {0x044e, {0x00, 0x00, 0x6e, 0x6a, 0x6a, 0x6a, 0x6e, 0x00}},
-        {0x044f, {0x00, 0x00, 0x3e, 0x66, 0x3e, 0x06, 0x66, 0x00}},
-    };
-    for (unsigned int i = 0; i < sizeof table / sizeof table[0]; i++) {
-        if (table[i].code == code) {
-            return table[i].rows;
-        }
-    }
-    return 0;
-}
-
 static void blit_rows(int x, int y, const unsigned char *rows, unsigned int color, int scale) {
     for (int row = 0; row < 8; row++) {
         unsigned char bits = rows[row];
@@ -288,7 +242,8 @@ static void glyph_code(int x, int y, unsigned int code, unsigned int color, int 
     if (code >= 32 && code <= 127) {
         rows = FONT8X8[code - 32];
     } else {
-        rows = cyr_rows(code);
+        const struct cyr_glyph *g = cyr_glyph(code);
+        rows = g ? g->rows : 0;
     }
     if (rows == 0) {
         rows = FONT8X8[' ' - 32];
@@ -301,18 +256,8 @@ static int utf8_next(const char **message, unsigned int *code) {
     if (*s == 0) {
         return 0;
     }
-    if (*s < 0x80u) {
-        *code = *s;
-        *message += 1;
-        return 1;
-    }
-    if ((*s & 0xe0u) == 0xc0u && (s[1] & 0xc0u) == 0x80u) {
-        *code = ((unsigned int)(s[0] & 0x1fu) << 6) | (unsigned int)(s[1] & 0x3fu);
-        *message += 2;
-        return 1;
-    }
-    *code = ' ';
-    *message += 1;
+    /* The terminating 0 is not a continuation byte, so 4 is a safe bound. */
+    *message += utf8_decode(s, 4, code);
     return 1;
 }
 
@@ -410,6 +355,8 @@ static void collect_files(void) {
     }
 }
 
+static void draw_bar(void);
+
 static void draw_home_ui(void) {
     fill(0, 0, FB_W, FB_H, BG);
     text(48, 28, "genesis", YELLOW, 2);
@@ -420,6 +367,88 @@ static void draw_home_ui(void) {
         fill(24, y, FB_W - 48, home_band - 8, frame);
         fill(28, y + 4, FB_W - 56, home_band - 16, PAPER);
         text(48, y + 28, home_label(i), INK, 2);
+    }
+    draw_bar();
+}
+
+/* Command bar under the buttons: prompt, typed text, blinking cursor. */
+enum { BAR_X = 24, BAR_Y = 680, BAR_H = 80, BAR_TEXT_X = 40, CHAR_W = 18 };
+void desktop_run(const char *cmd, char *out, unsigned int size);
+static char bar_cmd[64];
+static int bar_len;
+static char bar_out[96];
+static int blink_on = 1;
+static unsigned int blink_ticks;
+static volatile int blink_due;
+
+static int utf8_chars(const char *s) {
+    int n = 0;
+    for (; *s; s++) {
+        if (!utf8_is_cont((unsigned char)*s)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void draw_bar_cursor(void) {
+    int x = BAR_TEXT_X + (9 + utf8_chars(bar_cmd)) * CHAR_W;
+    fill(x, BAR_Y + 10, 14, 18, blink_on ? YELLOW : PAPER);
+}
+
+static void draw_bar(void) {
+    fill(BAR_X, BAR_Y, FB_W - 2 * BAR_X, BAR_H, YELLOW);
+    fill(BAR_X + 4, BAR_Y + 4, FB_W - 2 * BAR_X - 8, BAR_H - 8, PAPER);
+    text(BAR_TEXT_X, BAR_Y + 12, "genesis> ", YELLOW, 2);
+    text(BAR_TEXT_X + 9 * CHAR_W, BAR_Y + 12, bar_cmd, INK, 2);
+    text(BAR_TEXT_X, BAR_Y + 48, bar_out[0] ? bar_out : "Введите команду и нажмите Enter (help)", FRAME, 2);
+    draw_bar_cursor();
+}
+
+static void bar_key(char ch) {
+    unsigned char u = (unsigned char)ch;
+    if (ch == '\n') {
+        if (bar_len == 0) {
+            return;
+        }
+        if ((bar_cmd[0] == 'e' && bar_cmd[1] == 'd' && bar_cmd[2] == 'i' && bar_cmd[3] == 't') ||
+            (bar_cmd[0] == 'd' && bar_cmd[1] == 'e' && bar_cmd[2] == 's' && bar_cmd[3] == 'k')) {
+            const char *msg = "edit/desktop: кнопки выше";
+            int k = 0;
+            while (msg[k] && k + 1 < (int)sizeof bar_out) {
+                bar_out[k] = msg[k];
+                k++;
+            }
+            bar_out[k] = 0;
+        } else {
+            desktop_run(bar_cmd, bar_out, sizeof bar_out);
+        }
+        bar_len = 0;
+        bar_cmd[0] = 0;
+    } else if (ch == '\b') {
+        if (bar_len == 0) {
+            return;
+        }
+        bar_len--;
+        while (bar_len > 0 && utf8_is_cont((unsigned char)bar_cmd[bar_len])) {
+            bar_len--;
+        }
+        bar_cmd[bar_len] = 0;
+    } else {
+        if (u < 32 || u == 127 || bar_len + 1 >= (int)sizeof bar_cmd) {
+            return;
+        }
+        if (u >= 0xc0 && bar_len + 5 >= (int)sizeof bar_cmd) {
+            return;
+        }
+        bar_cmd[bar_len++] = ch;
+        bar_cmd[bar_len] = 0;
+    }
+    if (desktop_on && view == VIEW_HOME) {
+        blink_on = 1;
+        cursor_erase();
+        draw_bar();
+        cursor_paint();
     }
 }
 
@@ -704,13 +733,20 @@ static void editor_key(char ch) {
     if (ch == '\b') {
         if (editor_len > 0) {
             editor_len--;
+            while (editor_len > 0 && utf8_is_cont((unsigned char)editor_text[editor_len])) {
+                editor_len--;
+            }
             editor_text[editor_len] = 0;
             console_putc('\b');
             redraw_editor_line();
         }
         return;
     }
-    if (ch < 32 || ch > 126) {
+    unsigned char u = (unsigned char)ch;
+    if (u < 32 || u == 127) {
+        return; /* bytes >= 0x80 are UTF-8 (Russian letters) */
+    }
+    if (u >= 0xc0 && editor_len + 5 >= (int)sizeof editor_text) {
         return;
     }
     if (editor_len + 1 >= (int)sizeof editor_text) {
@@ -787,6 +823,9 @@ void desktop_key(char ch) {
     if (view == VIEW_EDITOR) {
         editor_key(ch);
     }
+    if (view == VIEW_HOME) {
+        bar_key(ch);
+    }
 }
 
 static inline void outb(unsigned short port, unsigned char value) {
@@ -862,6 +901,10 @@ void timer_tick(void) {
     if (!desktop_on) {
         return; /* the PIT also drives the scheduler; the clock is a desktop thing */
     }
+    if (++blink_ticks >= 50) {
+        blink_ticks = 0;
+        blink_due = 1;
+    }
     clock_ticks++;
     if (clock_ticks < 100) {
         return;
@@ -872,6 +915,15 @@ void timer_tick(void) {
 }
 
 void clock_service(void) {
+    if (blink_due) {
+        blink_due = 0;
+        blink_on ^= 1;
+        if (desktop_on && view == VIEW_HOME) {
+            cursor_erase();
+            draw_bar_cursor();
+            cursor_paint();
+        }
+    }
     if (!clock_due) {
         return;
     }

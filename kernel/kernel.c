@@ -42,12 +42,24 @@ void task_sleep(unsigned int ticks);
 void cmd_ps(void);
 
 #include "editor.h"
+#include "utf8.h"
 
 static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
 
-static void vga_hide_cursor(void) {
+/* Thick blinking hardware cursor (VGA blinks it on its own timer). */
+static void vga_show_cursor(void) {
     outb(0x3d4, 0x0a);
-    outb(0x3d5, 0x20);
+    outb(0x3d5, 0x0b);
+    outb(0x3d4, 0x0b);
+    outb(0x3d5, 0x0f);
+}
+
+static void vga_cursor_at(int row, int col) {
+    unsigned short pos = (unsigned short)(row * VGA_COLS + (col < VGA_COLS ? col : VGA_COLS - 1));
+    outb(0x3d4, 0x0f);
+    outb(0x3d5, (unsigned char)(pos & 0xff));
+    outb(0x3d4, 0x0e);
+    outb(0x3d5, (unsigned char)(pos >> 8));
 }
 
 static void vga_clear(void) {
@@ -65,6 +77,57 @@ static void vga_puts(int row, int col, const char *text) {
     }
 }
 
+/* Put the Cyrillic glyphs into the VGA text font (plane 2), in CP866 slots,
+ * so text cells can hold Russian letters. Each 8x8 row is drawn twice. */
+static void vga_load_cyrillic(void) {
+    volatile unsigned char *font = (volatile unsigned char *)0xa0000;
+    outb(0x3c4, 0x00); outb(0x3c5, 0x01);
+    outb(0x3c4, 0x02); outb(0x3c5, 0x04);
+    outb(0x3c4, 0x04); outb(0x3c5, 0x07);
+    outb(0x3c4, 0x00); outb(0x3c5, 0x03);
+    outb(0x3ce, 0x04); outb(0x3cf, 0x02);
+    outb(0x3ce, 0x05); outb(0x3cf, 0x00);
+    outb(0x3ce, 0x06); outb(0x3cf, 0x00);
+    outb(0x3ce, 0x01); outb(0x3cf, 0x00);
+    outb(0x3ce, 0x03); outb(0x3cf, 0x00);
+    outb(0x3ce, 0x08); outb(0x3cf, 0xff);
+    for (int i = 0; i < CYR8X8_COUNT; i++) {
+        volatile unsigned char *cell = font + (unsigned int)CYR8X8[i].slot * 32u;
+        for (int row = 0; row < 16; row++) {
+            cell[row] = CYR8X8[i].rows[row / 2];
+        }
+    }
+    outb(0x3c4, 0x00); outb(0x3c5, 0x01);
+    outb(0x3c4, 0x02); outb(0x3c5, 0x03);
+    outb(0x3c4, 0x04); outb(0x3c5, 0x03);
+    outb(0x3c4, 0x00); outb(0x3c5, 0x03);
+    outb(0x3ce, 0x04); outb(0x3cf, 0x00);
+    outb(0x3ce, 0x05); outb(0x3cf, 0x10);
+    outb(0x3ce, 0x06); outb(0x3cf, 0x0e);
+}
+
+static int kbd_ru;
+
+/* EN/RU in the top-right corner of the text console. */
+static void layout_indicator(void) {
+    vga_puts(0, VGA_COLS - 2, kbd_ru ? "RU" : "EN");
+}
+
+int kbd_layout_ru(void) {
+    return kbd_ru;
+}
+
+#define BOOT_HINT "Введите команду и нажмите Enter (help — список команд)"
+
+static void vga_puts_utf8(int row, int col, const char *text, unsigned char attr) {
+    const unsigned char *s = (const unsigned char *)text;
+    unsigned int cp;
+    while (*s && col < VGA_COLS) {
+        s += utf8_decode(s, 4, &cp);
+        VGA[row * VGA_COLS + col++] = (unsigned short)((attr << 8) | vga_cell(cp));
+    }
+}
+
 static int type_row = 1;
 static int type_col = 0;
 
@@ -75,6 +138,8 @@ static void screen_scroll(void) {
     }
     for (int i = (VGA_ROWS - 1) * VGA_COLS; i < VGA_COLS * VGA_ROWS; i++) {
         VGA[i] = blank;
+    }    if (kbd_ru) {
+        layout_indicator();
     }
 }
 
@@ -86,7 +151,52 @@ static void screen_advance_row(void) {
     }
 }
 
+static unsigned char utf8_pend[4];
+static unsigned int utf8_have;
+
+static void screen_cell(unsigned char cell);
+
+/* Console bytes are UTF-8: gather a sequence, then draw one cell for it. */
 static void screen_putc(char ch) {
+    unsigned char b = (unsigned char)ch;
+    if (utf8_have > 0 && utf8_is_cont(b)) {
+        utf8_pend[utf8_have++] = b;
+        unsigned int cp = 0;
+        unsigned char lead = utf8_pend[0];
+        unsigned int want = (lead & 0xe0u) == 0xc0u ? 2u : (lead & 0xf0u) == 0xe0u ? 3u : 4u;
+        if (utf8_have < want && utf8_have < sizeof utf8_pend) {
+            return;
+        }
+        utf8_decode(utf8_pend, utf8_have, &cp);
+        utf8_have = 0;
+        screen_cell(vga_cell(cp));
+        return;
+    }
+    if (utf8_have > 0) {
+        utf8_have = 0;
+        screen_cell('?');
+    }
+    if (b >= 0xc0u && b < 0xf8u) {
+        utf8_pend[utf8_have++] = b;
+        return;
+    }
+    if (b >= 0x80u) {
+        screen_cell('?');
+        return;
+    }
+    screen_cell(b);
+}
+
+static void screen_cell_raw(unsigned char ch);
+
+static void screen_cell(unsigned char ch) {
+    screen_cell_raw(ch);
+    if (!editor_active() && !desktop_active()) {
+        vga_cursor_at(type_row, type_col);
+    }
+}
+
+static void screen_cell_raw(unsigned char ch) {
     const unsigned short blank = (unsigned short)((VGA_ATTR << 8) | ' ');
     if (ch == '\b') {
         if (type_col > 0) {
@@ -140,6 +250,38 @@ static char decode_set1(unsigned char scancode, int shift, int caps) {
         return shifted[scancode];
     }
     return ch;
+}
+
+/* ЙЦУКЕН on the same keys; 0 means "type the Latin character". */
+static unsigned int decode_ru(unsigned char scancode, int shift, int caps) {
+    static const unsigned short letters[128] = {
+        [0x10] = 0x439, [0x11] = 0x446, [0x12] = 0x443, [0x13] = 0x43a, [0x14] = 0x435,
+        [0x15] = 0x43d, [0x16] = 0x433, [0x17] = 0x448, [0x18] = 0x449, [0x19] = 0x437,
+        [0x1a] = 0x445, [0x1b] = 0x44a, [0x1e] = 0x444, [0x1f] = 0x44b, [0x20] = 0x432,
+        [0x21] = 0x430, [0x22] = 0x43f, [0x23] = 0x440, [0x24] = 0x43e, [0x25] = 0x43b,
+        [0x26] = 0x434, [0x27] = 0x436, [0x28] = 0x44d, [0x2c] = 0x44f, [0x2d] = 0x447,
+        [0x2e] = 0x441, [0x2f] = 0x43c, [0x30] = 0x438, [0x31] = 0x442, [0x32] = 0x44c,
+        [0x33] = 0x431, [0x34] = 0x44e, [0x29] = 0x451,
+    };
+    if (scancode >= 128) {
+        return 0;
+    }
+    unsigned int cp = letters[scancode];
+    if (cp != 0) {
+        if (shift ^ caps) {
+            cp = cp == 0x451 ? 0x401 : cp - 0x20;
+        }
+        return cp;
+    }
+    switch (scancode) {
+    case 0x35: return shift ? ',' : '.';
+    case 0x03: return shift ? '"' : 0;
+    case 0x04: return shift ? 0x2116 : 0;
+    case 0x05: return shift ? ';' : 0;
+    case 0x07: return shift ? ':' : 0;
+    case 0x08: return shift ? '?' : 0;
+    default: return 0;
+    }
 }
 
 static void ps2_wait_write(void) {
@@ -246,6 +388,7 @@ static int kbd_shift;
 static int kbd_caps;
 static int kbd_e0;
 static int kbd_ctrl;
+static int kbd_alt;
 #define KEY_UP ((char)1)
 #define KEY_DOWN ((char)2)
 static int kbd_count;
@@ -310,6 +453,27 @@ static void mouse_flush(void) {
     desktop_mouse(x, y, left);
 }
 
+static void layout_toggle(void) {
+    kbd_ru ^= 1;
+    if (!desktop_active() && !editor_active()) {
+        layout_indicator();
+    }
+    if (editor_active()) {
+        editor_key(ED_REDRAW);
+    }
+}
+
+/* One typed byte (UTF-8 bytes arrive one by one) to whoever has the focus. */
+static void deliver(char ch) {
+    if (editor_active()) {
+        editor_key((unsigned char)ch);
+    } else if (desktop_active()) {
+        desktop_key(ch);
+    } else {
+        shell_input(ch);
+    }
+}
+
 static void ps2_apply(void) {
     unsigned long flags;
     ps2_lock(&flags);
@@ -330,6 +494,13 @@ static void ps2_apply(void) {
             kbd_e0 = 0;
             if (b == 0x1d || b == 0x9d) {
                 kbd_ctrl = b == 0x1d;
+                continue;
+            }
+            if (b == 0x38 || b == 0xb8) {
+                kbd_alt = b == 0x38;
+                if (kbd_alt && kbd_shift) {
+                    layout_toggle();
+                }
                 continue;
             }
             if (editor_active()) {
@@ -358,7 +529,21 @@ static void ps2_apply(void) {
             continue;
         }
         if (b == 0x2a || b == 0x36) {
+            if (kbd_alt && !kbd_shift) {
+                layout_toggle();
+            }
             kbd_shift = 1;
+            continue;
+        }
+        if (b == 0x38 || b == 0xb8) {
+            kbd_alt = b == 0x38;
+            if (kbd_alt && kbd_shift) {
+                layout_toggle();
+            }
+            continue;
+        }
+        if (b == 0x39 && kbd_ctrl) {
+            layout_toggle();
             continue;
         }
         if (b == 0xaa || b == 0xb6) {
@@ -384,21 +569,24 @@ static void ps2_apply(void) {
         if (ch == 0) {
             continue;
         }
-        if (editor_active()) {
-            if (kbd_ctrl && (ch == 's' || ch == 'S')) {
+        if (editor_active() && kbd_ctrl) {
+            if (ch == 's' || ch == 'S') {
                 editor_key(ED_SAVE);
-            } else if (kbd_ctrl && (ch == 'q' || ch == 'Q')) {
+            } else if (ch == 'q' || ch == 'Q') {
                 editor_key(ED_QUIT);
-            } else if (!kbd_ctrl) {
-                editor_key((unsigned char)ch);
             }
             continue;
         }
-        if (desktop_active()) {
-            desktop_key(ch);
+        unsigned int cp = kbd_ru ? decode_ru(b, kbd_shift, kbd_caps) : 0;
+        if (cp != 0) {
+            char bytes[4];
+            int n = utf8_encode(cp, bytes);
+            for (int k = 0; k < n; k++) {
+                deliver(bytes[k]);
+            }
             continue;
         }
-        shell_input(ch);
+        deliver(ch);
     }
 }
 
@@ -471,6 +659,10 @@ static char *cap_buf;
 static unsigned int cap_len;
 static int cap_on;
 
+static char desk_cap[96];
+static unsigned int desk_cap_len;
+static int desk_cap_on;
+
 void console_putc(char ch) {
     if (cap_on && task_current() == 0) {
         /* Shell pipe or redirect: collect output instead of printing it. */
@@ -480,6 +672,10 @@ void console_putc(char ch) {
         return;
     }
     serial_putc(ch);
+    if (desk_cap_on && desk_cap_len + 1 < sizeof desk_cap) {
+        desk_cap[desk_cap_len++] = ch == '\n' ? ' ' : ch;
+        desk_cap[desk_cap_len] = 0;
+    }
     if (!desktop_active() && !editor_active()) {
         screen_putc(ch);
     }
@@ -938,7 +1134,7 @@ int fs_put(const char *name, const char *data, unsigned int length) {
 }
 
 void editor_closed(void) {
-    vga_hide_cursor();
+    vga_show_cursor();
     vga_clear();
     type_row = 0;
     type_col = 0;
@@ -1234,6 +1430,33 @@ static void execute(char *input) {
 
 static void prompt(void) {
     console_puts("genesis> ");
+}
+
+static void sh_run_line(const char *src);
+
+/* The desktop command bar runs one line; output goes to COM1 and `out`. */
+void desktop_run(const char *cmd, char *out, unsigned int size) {
+    char copy[LINE_MAX];
+    unsigned int n = 0;
+    while (cmd[n] != 0 && n + 1 < LINE_MAX) {
+        copy[n] = cmd[n];
+        n++;
+    }
+    copy[n] = 0;
+    console_puts("genesis> ");
+    console_puts(copy);
+    console_putc('\n');
+    desk_cap_len = 0;
+    desk_cap[0] = 0;
+    desk_cap_on = 1;
+    sh_run_line(copy);
+    desk_cap_on = 0;
+    unsigned int k = 0;
+    while (k + 1 < size && desk_cap[k] != 0) {
+        out[k] = desk_cap[k];
+        k++;
+    }
+    out[k] = 0;
 }
 
 /* ---- developer shell: tokens, variables, pipes, redirects, scripts ---- */
@@ -1747,6 +1970,9 @@ static int hist_pos;
 static void line_erase(void) {
     while (line_len > 0) {
         line_len--;
+        if (utf8_is_cont((unsigned char)line[line_len])) {
+            continue; /* one cell per character, not per byte */
+        }
         screen_putc('\b');
         serial_putc('\b');
         serial_putc(' ');
@@ -1817,12 +2043,18 @@ static void shell_input(char ch) {
     if (ch == '\b') {
         if (line_len > 0) {
             line_len--;
+            while (line_len > 0 && utf8_is_cont((unsigned char)line[line_len])) {
+                line_len--;
+            }
             screen_putc('\b');
             serial_putc('\b');
             serial_putc(' ');
             serial_putc('\b');
         }
         return;
+    }
+    if (line_len + 4 >= LINE_MAX && !utf8_is_cont((unsigned char)ch)) {
+        return; /* keep room so a whole UTF-8 character always fits */
     }
     if (line_len + 1 >= LINE_MAX) {
         return;
@@ -1873,12 +2105,15 @@ __attribute__((noreturn)) void kmain(unsigned int mb_info) {
     if (disk_consume_home()) {
         cmd_desktop();
     }
-    vga_hide_cursor();
+    vga_show_cursor();
+    vga_load_cyrillic();
     vga_clear();
     type_row = 1;
     type_col = 0;
     vga_puts(0, 0, "genesis: kernel booted");
+    vga_puts_utf8(0, 24, BOOT_HINT, 0x0e);
     serial_puts("genesis: kernel booted\n");
+    serial_puts(BOOT_HINT "\n");
     link_init();
     keyboard_drain();
     timer_start();

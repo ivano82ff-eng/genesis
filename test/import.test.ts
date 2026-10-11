@@ -38,6 +38,7 @@ test("files from an import folder land on the genesis disk", { timeout: 180_000 
     await g1.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
     await ask(g1, "ls", "my.txt");
     await ask(g1, "cat my.txt", "cat: hello-import");
+    await g1.waitForSerial("Привет, genesis", DEFAULT_TIMEOUT_MS);
     await ask(g1, "cat readme", "cat: welcome to genesis");
     await ask(g1, "ls", "ticker");
     await ask(g1, "write keep kept", "write: keep");

@@ -1,6 +1,7 @@
 /* Full-screen text editor for the VGA text console: `edit FILE`. */
 #include "fs_limits.h"
 #include "editor.h"
+#include "utf8.h"
 
 static inline void ed_outb(unsigned short port, unsigned char value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -10,6 +11,7 @@ int fs_get(const char *name, const unsigned char **data, unsigned int *length);
 int fs_put(const char *name, const char *data, unsigned int length);
 void console_puts(const char *text);
 void editor_closed(void);
+int kbd_layout_ru(void);
 
 enum { COLS = 80, ROWS = 25, TEXT_ROWS = 24, GUTTER = 5, TEXT_COLS = COLS - GUTTER };
 enum { LANG_NONE = 0, LANG_C, LANG_ASM, LANG_SH };
@@ -174,7 +176,7 @@ static void cursor_pos(int *line, int *col) {
         if (buf[i] == '\n') {
             l++;
             c = 0;
-        } else {
+        } else if (!utf8_is_cont((unsigned char)buf[i])) {
             c++;
         }
     }
@@ -230,10 +232,19 @@ static void render(void) {
             int w = num_str(num, (unsigned int)line + 1);
             for (int c = 0; c < GUTTER; c++) put(row, c, ' ', C_GUTTER);
             put_str(row, GUTTER - 1 - w, num, C_GUTTER);
+            /* Walk characters, not bytes: one cell per UTF-8 character. */
+            int k = 0, col = 0;
+            while (k < n && col < left) {
+                unsigned int cp;
+                k += utf8_decode((const unsigned char *)buf + at + k, (unsigned int)(n - k), &cp);
+                col++;
+            }
             for (int c = 0; c < TEXT_COLS; c++) {
-                int k = left + c;
                 if (k < n) {
-                    put(row, GUTTER + c, buf[at + k], k < span ? attr[k] : C_TEXT);
+                    unsigned int cp;
+                    int a = k < span ? attr[k] : C_TEXT;
+                    k += utf8_decode((const unsigned char *)buf + at + k, (unsigned int)(n - k), &cp);
+                    put(row, GUTTER + c, (char)vga_cell(cp), (unsigned char)a);
                 } else {
                     put(row, GUTTER + c, ' ', C_TEXT);
                 }
@@ -256,7 +267,7 @@ static void render(void) {
     k += num_str(status + k, (unsigned int)cline + 1);
     status[k++] = ':';
     k += num_str(status + k, (unsigned int)ccol + 1);
-    const char *tail = "  ^S save  ^Q/Esc quit  ";
+    const char *tail = kbd_layout_ru() ? "  RU  ^S save  ^Q/Esc quit  " : "  EN  ^S save  ^Q/Esc quit  ";
     for (const char *s = tail; *s && k < COLS; s++) status[k++] = *s;
     for (const char *s = note; *s && k < COLS; s++) status[k++] = *s;
     while (k < COLS) status[k++] = ' ';
@@ -299,8 +310,11 @@ static void move_vertical(int lines) {
         lines--;
     }
     unsigned int end = line_end(at);
-    cur = at + (unsigned int)want_col;
-    if (cur > end) cur = end;
+    cur = at;
+    for (int c = 0; c < want_col && cur < end; c++) {
+        cur++;
+        while (cur < end && utf8_is_cont((unsigned char)buf[cur])) cur++;
+    }
 }
 
 static void save(void) {
@@ -347,9 +361,13 @@ void editor_key(int key) {
         return;
     case ED_LEFT:
         if (cur > 0) cur--;
+        while (cur > 0 && utf8_is_cont((unsigned char)buf[cur])) cur--;
         break;
     case ED_RIGHT:
         if (cur < len) cur++;
+        while (cur < len && utf8_is_cont((unsigned char)buf[cur])) cur++;
+        break;
+    case ED_REDRAW:
         break;
     case ED_UP:
         move_vertical(-1);
@@ -371,18 +389,22 @@ void editor_key(int key) {
         break;
     case ED_DELETE:
         erase(cur);
+        while (cur < len && utf8_is_cont((unsigned char)buf[cur])) erase(cur);
         break;
     case '\b':
         if (cur > 0) {
             cur--;
+            while (cur > 0 && utf8_is_cont((unsigned char)buf[cur])) cur--;
             erase(cur);
+            while (cur < len && utf8_is_cont((unsigned char)buf[cur])) erase(cur);
         }
         break;
     case ED_TAB:
         for (int i = 0; i < 4; i++) insert(' ');
         break;
     default:
-        if (key == '\n' || (key >= 32 && key < 127)) insert((char)key);
+        if (key == '\n' || (key >= 32 && key < 127) || (key >= 0x80 && key < 0x100)) insert((char)key);
+        if (key >= 0xc0 && key < 0x100) return; /* rest of the UTF-8 character follows */
         break;
     }
     render();
