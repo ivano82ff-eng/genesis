@@ -3,18 +3,23 @@
 void viewer_main(struct genesis_api *api) {
     api->fill(40, 90, GENESIS_FB_W - 80, GENESIS_FB_H - 120, 0x00243044u);
     api->text(48, 100, api->file_name, 0x00f0c14au, 2);
-    char line[64];
+    char line[96];
     unsigned int at = 0;
     int y = 150;
     api->puts("txt: ");
     while (at < api->file_len && y < GENESIS_FB_H - 40) {
         unsigned int n = 0;
         while (at < api->file_len && n + 1 < sizeof line) {
-            unsigned char ch = api->file[at++];
+            unsigned char ch = api->file[at];
+            /* UTF-8: never split a character across two screen lines. */
+            if (ch >= 0xc0 && n + 5 >= sizeof line) {
+                break;
+            }
+            at++;
             if (ch == '\n') {
                 break;
             }
-            if (ch >= 32 && ch < 127) {
+            if ((ch >= 32 && ch < 127) || ch >= 0x80) {
                 line[n++] = (char)ch;
             }
         }
