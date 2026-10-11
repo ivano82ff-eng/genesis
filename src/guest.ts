@@ -4,6 +4,7 @@ import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export type DisplayMode = "none" | "gtk";
 
@@ -234,8 +235,10 @@ export async function startGuest(options: {
   let exitCode: number | null = null;
   let stopped = false;
 
+  // Serial bytes arrive in arbitrary chunks; keep multibyte UTF-8 (Cyrillic labels) intact.
+  const serialDecoder = new StringDecoder("utf8");
   child.stdout?.on("data", (buf: Buffer) => {
-    const text = buf.toString("utf8");
+    const text = serialDecoder.write(buf);
     process.stdout.write(text);
     serial += text;
     events.emit("serial");
