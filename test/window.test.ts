@@ -8,6 +8,7 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { click, countOf, delay, typeLine } from "./helpers.js";
+import { CELL, fileRow } from "./ui.js";
 
 test(
   "a file name opens its text and Назад returns home",
@@ -24,10 +25,10 @@ test(
       await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await click(guest, 200, 220);
+      await click(guest, CELL.files.x, CELL.files.y);
       await guest.waitForSerial("ls: ", DEFAULT_TIMEOUT_MS);
       // /home: row 0 is "..", row 1 is readme.
-      await click(guest, 200, 208);
+      await click(guest, fileRow(1).x, fileRow(1).y);
       await guest.waitForSerial("txt: welcome to genesis", DEFAULT_TIMEOUT_MS);
       const homes = countOf(guest.serial, "home: ready");
       await click(guest, 80, 40);

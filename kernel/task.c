@@ -156,3 +156,53 @@ void cmd_ps(void) {
         console_putc('\n');
     }
 }
+
+/* Background tasks (everything but the shell) that are running now. */
+int task_count(void) {
+    int n = 0;
+    for (int i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].state == TASK_READY) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Name and ticks of task I if it runs; 0 when the slot is empty. */
+int task_info(int i, char *name, unsigned int cap, unsigned int *ticks) {
+    if (i < 0 || i >= TASK_MAX || tasks[i].state != TASK_READY) {
+        return 0;
+    }
+    unsigned int n = 0;
+    while (tasks[i].name[n] != 0 && n + 1 < cap) {
+        name[n] = tasks[i].name[n];
+        n++;
+    }
+    name[n] = 0;
+    *ticks = tasks[i].ticks;
+    return 1;
+}
+
+int task_max(void) {
+    return TASK_MAX;
+}
+
+/* Stop background task ID. 1 on success, 0 if there is no such task,
+ * -1 for the shell (task 0), which cannot be stopped. */
+int task_kill(int id) {
+    if (id == 0) {
+        return -1;
+    }
+    if (id < 0 || id >= TASK_MAX) {
+        return 0;
+    }
+    unsigned long flags;
+    irq_off(&flags);
+    int ok = tasks[id].state == TASK_READY;
+    if (ok) {
+        /* Never the running task: kill comes from the shell (task 0). */
+        tasks[id].state = id == current ? TASK_DEAD : TASK_FREE;
+    }
+    irq_restore(flags);
+    return ok;
+}

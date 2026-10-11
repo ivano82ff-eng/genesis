@@ -8,7 +8,8 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { delay, typeLine } from "./helpers.js";
+import { click, typeLine } from "./helpers.js";
+import { CELL } from "./ui.js";
 
 function lightCount(ppm: Buffer, x: number, y: number, w: number, h: number): number {
   const image = parsePpm(ppm);
@@ -26,7 +27,7 @@ function lightCount(ppm: Buffer, x: number, y: number, w: number, h: number): nu
 }
 
 test(
-  "the editor shows readme text and Назад",
+  "Редактор opens the full-screen editor with readme text",
   { timeout: 90_000 },
   async () => {
     const missing = missingTools(["qemu-system-x86_64"]);
@@ -40,22 +41,11 @@ test(
       await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      let left = 200;
-      let top = 320;
-      while (left > 0 || top > 0) {
-        const stepX = Math.min(40, left);
-        const stepY = Math.min(40, top);
-        await guest.monitor(`mouse_move ${stepX} ${stepY}`);
-        left -= stepX;
-        top -= stepY;
-        await delay(200);
-      }
-      await guest.monitor("mouse_button 1");
-      await delay(80);
-      await guest.monitor("mouse_button 0");
+      await click(guest, CELL.editor.x, CELL.editor.y);
       await guest.waitForSerial("edit: welcome to genesis", DEFAULT_TIMEOUT_MS);
-      assert.match(guest.serial, /Назад/);
-      const lights = lightCount(await guest.screendump(), 48, 150, 400, 40);
+      // Full-screen editor on the framebuffer: line 1 holds the readme text.
+      await new Promise((r) => setTimeout(r, 300));
+      const lights = lightCount(await guest.screendump(), 32, 9, 400, 30);
       assert.ok(lights > 30, `текст редактора не виден (${lights})`);
     } finally {
       await guest.stop();

@@ -38,7 +38,7 @@ test("blinking cursor after the prompt, boot hint, desktop command bar", { timeo
     const colors = new Set<string>();
     for (let i = 0; i < 12 && colors.size < 2; i++) {
       const img = parsePpm(await guest.screendump());
-      colors.add(pixel(img, 40 + 9 * 18 + 6, 699).join(","));
+      colors.add(pixel(img, 308, 699).join(","));
       await delay(200);
     }
     assert.ok(colors.has("240,193,74"), `курсор строки команд не появился: ${[...colors].join(" ")}`);

@@ -26,7 +26,9 @@ function usage(code: number): never {
   run [--timeout СЕК]   запустить QEMU, снять COM1
   test [--timeout СЕК]  то же, что run: код 0 только если найден маркер
   log [--timeout СЕК]   дождаться приглашения и отдать журнал COM1
-  show [--timeout СЕК]  открыть стол в окне и не закрывать его
+  show [--timeout СЕК] [--size ШxВ | --portrait | --tv]
+                        открыть стол в окне и не закрывать его
+                        (--portrait = 480x800 как телефон, --tv = 1920x1080)
 
 Маркер: ${BOOT_MARKER}
 Таймаут по умолчанию: ${DEFAULT_TIMEOUT_MS / 1000} с. Для show это только ожидание появления стола.
@@ -77,7 +79,30 @@ async function boot(timeoutMs: number): Promise<void> {
   console.error("Маркер найден");
 }
 
-async function show(timeoutMs: number): Promise<void> {
+/** --size WxH, --portrait, --tv for show; returns the rest of the args. */
+function readSize(args: string[]): { size: string | null; rest: string[] } {
+  const rest: string[] = [];
+  let size: string | null = null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--portrait") {
+      size = "480x800";
+    } else if (arg === "--tv") {
+      size = "1920x1080";
+    } else if (arg === "--size") {
+      const raw = args[++i] ?? "";
+      if (!/^\d{3,4}x\d{3,4}$/.test(raw)) {
+        throw new Error("--size ждёт ШxВ, например 720x1280");
+      }
+      size = raw;
+    } else {
+      rest.push(arg);
+    }
+  }
+  return { size, rest };
+}
+
+async function show(timeoutMs: number, size: string | null = null): Promise<void> {
   const qemuBin = pickQemu("gtk");
   if (qemuBin === "qemu-system-x86_64") {
     const missing = missingTools(["qemu-system-x86_64"]);
@@ -106,7 +131,7 @@ async function show(timeoutMs: number): Promise<void> {
         throw new Error("Домашний экран не появился");
       }
       if (!guest.serial.includes("hello from program")) {
-        await typeLine(guest, "desktop");
+        await typeLine(guest, size ? `desktop ${size}` : "desktop");
       }
       await delay(400);
     }
@@ -169,7 +194,8 @@ async function main(): Promise<void> {
   }
 
   if (command === "show") {
-    await show(readTimeout(rest));
+    const { size, rest: other } = readSize(rest);
+    await show(readTimeout(other), size);
     return;
   }
 

@@ -8,24 +8,25 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { click, delay, typeLine } from "./helpers.js";
+import { CELL, fileRow } from "./ui.js";
 
-async function openRow(guest: Guest, rowY: number, expect: string): Promise<void> {
-  await click(guest, 200, 420);
-  await guest.waitForSerial("open: ", DEFAULT_TIMEOUT_MS);
+async function openRow(guest: Guest, row: number, expect: string): Promise<void> {
+  await click(guest, CELL.files.x, CELL.files.y);
+  await guest.waitForSerial("ls: ", DEFAULT_TIMEOUT_MS);
   // Samples live in /docs: «..» (row 0) to /, then docs (bin, lib, docs, home: row 2).
   await delay(100);
-  await click(guest, 200, 148);
+  await click(guest, fileRow(0).x, fileRow(0).y);
   await guest.waitForSerial("dir: / ls: bin/ lib/ docs/ home/", DEFAULT_TIMEOUT_MS);
   await delay(100);
-  await click(guest, 200, 268);
+  await click(guest, fileRow(2).x, fileRow(2).y);
   await guest.waitForSerial("dir: /docs ls: note.txt", DEFAULT_TIMEOUT_MS);
   await delay(100);
-  await click(guest, 200, rowY);
+  await click(guest, fileRow(row).x, fileRow(row).y);
   await guest.waitForSerial(expect, DEFAULT_TIMEOUT_MS);
 }
 
 test(
-  "Открыть runs txt, docx, image, pdf, and mp4 viewers",
+  "Файлы runs txt, docx, image, pdf, and mp4 viewers",
   { timeout: 120_000 },
   async () => {
     const missing = missingTools(["qemu-system-x86_64"]);
@@ -39,8 +40,8 @@ test(
       await txt.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(txt, "desktop");
       await txt.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      assert.match(txt.serial, /Открыть/);
-      await openRow(txt, 208, "txt: hello from note.txt");
+      assert.match(txt.serial, /Файлы/);
+      await openRow(txt, 1, "txt: hello from note.txt");
       await txt.waitForSerial("Привет из genesis — «ёж» №1", DEFAULT_TIMEOUT_MS);
     } finally {
       await txt.stop();
@@ -51,7 +52,7 @@ test(
       await docx.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(docx, "desktop");
       await docx.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await openRow(docx, 268, "docx: genesis docx note");
+      await openRow(docx, 2, "docx: genesis docx note");
     } finally {
       await docx.stop();
     }
@@ -61,7 +62,7 @@ test(
       await img.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(img, "desktop");
       await img.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await openRow(img, 328, "image: ok");
+      await openRow(img, 3, "image: ok");
     } finally {
       await img.stop();
     }
@@ -71,7 +72,7 @@ test(
       await pdf.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(pdf, "desktop");
       await pdf.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await openRow(pdf, 448, "pdf: genesis pdf");
+      await openRow(pdf, 5, "pdf: genesis pdf");
     } finally {
       await pdf.stop();
     }
@@ -81,7 +82,7 @@ test(
       await mp4.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(mp4, "desktop");
       await mp4.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await openRow(mp4, 508, "mp4: play");
+      await openRow(mp4, 6, "mp4: play");
       await mp4.waitForSerial("mp4: frame", DEFAULT_TIMEOUT_MS);
       const first = await mp4.screendump();
       await delay(400);

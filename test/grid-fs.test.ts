@@ -76,9 +76,9 @@ test(
 
     const disk = path.join(os.tmpdir(), `grid-reuse-${process.pid}-${Date.now()}.img`);
     await writeFile(disk, Buffer.alloc(8 * 1024 * 1024));
-    // 256 catalog slots: 19 built-ins + 232 imports leave five for the writes below.
-    const pad = Array.from({ length: 232 }, (_, i) => ({ name: `pad${i}`, data: Buffer.from("p") }));
-    assert.equal((await importFiles(disk, pad)).imported.length, 232);
+    // 256 catalog slots: 20 built-ins + 231 imports leave five for the writes below.
+    const pad = Array.from({ length: 231 }, (_, i) => ({ name: `pad${i}`, data: Buffer.from("p") }));
+    assert.equal((await importFiles(disk, pad)).imported.length, 231);
     const image = await buildImage();
 
     const fill = async (guest: Awaited<ReturnType<typeof startGuest>>): Promise<void> => {
