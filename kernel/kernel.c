@@ -46,9 +46,20 @@ void cmd_ps(void);
 
 static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
 
-static void vga_hide_cursor(void) {
+/* Thick blinking hardware cursor (VGA blinks it on its own timer). */
+static void vga_show_cursor(void) {
     outb(0x3d4, 0x0a);
-    outb(0x3d5, 0x20);
+    outb(0x3d5, 0x0b);
+    outb(0x3d4, 0x0b);
+    outb(0x3d5, 0x0f);
+}
+
+static void vga_cursor_at(int row, int col) {
+    unsigned short pos = (unsigned short)(row * VGA_COLS + (col < VGA_COLS ? col : VGA_COLS - 1));
+    outb(0x3d4, 0x0f);
+    outb(0x3d5, (unsigned char)(pos & 0xff));
+    outb(0x3d4, 0x0e);
+    outb(0x3d5, (unsigned char)(pos >> 8));
 }
 
 static void vga_clear(void) {
@@ -104,6 +115,17 @@ static void layout_indicator(void) {
 
 int kbd_layout_ru(void) {
     return kbd_ru;
+}
+
+#define BOOT_HINT "Введите команду и нажмите Enter (help — список команд)"
+
+static void vga_puts_utf8(int row, int col, const char *text, unsigned char attr) {
+    const unsigned char *s = (const unsigned char *)text;
+    unsigned int cp;
+    while (*s && col < VGA_COLS) {
+        s += utf8_decode(s, 4, &cp);
+        VGA[row * VGA_COLS + col++] = (unsigned short)((attr << 8) | vga_cell(cp));
+    }
 }
 
 static int type_row = 1;
@@ -165,7 +187,16 @@ static void screen_putc(char ch) {
     screen_cell(b);
 }
 
+static void screen_cell_raw(unsigned char ch);
+
 static void screen_cell(unsigned char ch) {
+    screen_cell_raw(ch);
+    if (!editor_active() && !desktop_active()) {
+        vga_cursor_at(type_row, type_col);
+    }
+}
+
+static void screen_cell_raw(unsigned char ch) {
     const unsigned short blank = (unsigned short)((VGA_ATTR << 8) | ' ');
     if (ch == '\b') {
         if (type_col > 0) {
@@ -628,6 +659,10 @@ static char *cap_buf;
 static unsigned int cap_len;
 static int cap_on;
 
+static char desk_cap[96];
+static unsigned int desk_cap_len;
+static int desk_cap_on;
+
 void console_putc(char ch) {
     if (cap_on && task_current() == 0) {
         /* Shell pipe or redirect: collect output instead of printing it. */
@@ -637,6 +672,10 @@ void console_putc(char ch) {
         return;
     }
     serial_putc(ch);
+    if (desk_cap_on && desk_cap_len + 1 < sizeof desk_cap) {
+        desk_cap[desk_cap_len++] = ch == '\n' ? ' ' : ch;
+        desk_cap[desk_cap_len] = 0;
+    }
     if (!desktop_active() && !editor_active()) {
         screen_putc(ch);
     }
@@ -1095,7 +1134,7 @@ int fs_put(const char *name, const char *data, unsigned int length) {
 }
 
 void editor_closed(void) {
-    vga_hide_cursor();
+    vga_show_cursor();
     vga_clear();
     type_row = 0;
     type_col = 0;
@@ -1391,6 +1430,33 @@ static void execute(char *input) {
 
 static void prompt(void) {
     console_puts("genesis> ");
+}
+
+static void sh_run_line(const char *src);
+
+/* The desktop command bar runs one line; output goes to COM1 and `out`. */
+void desktop_run(const char *cmd, char *out, unsigned int size) {
+    char copy[LINE_MAX];
+    unsigned int n = 0;
+    while (cmd[n] != 0 && n + 1 < LINE_MAX) {
+        copy[n] = cmd[n];
+        n++;
+    }
+    copy[n] = 0;
+    console_puts("genesis> ");
+    console_puts(copy);
+    console_putc('\n');
+    desk_cap_len = 0;
+    desk_cap[0] = 0;
+    desk_cap_on = 1;
+    sh_run_line(copy);
+    desk_cap_on = 0;
+    unsigned int k = 0;
+    while (k + 1 < size && desk_cap[k] != 0) {
+        out[k] = desk_cap[k];
+        k++;
+    }
+    out[k] = 0;
 }
 
 /* ---- developer shell: tokens, variables, pipes, redirects, scripts ---- */
@@ -2039,13 +2105,15 @@ __attribute__((noreturn)) void kmain(unsigned int mb_info) {
     if (disk_consume_home()) {
         cmd_desktop();
     }
-    vga_hide_cursor();
+    vga_show_cursor();
     vga_load_cyrillic();
     vga_clear();
     type_row = 1;
     type_col = 0;
     vga_puts(0, 0, "genesis: kernel booted");
+    vga_puts_utf8(0, 24, BOOT_HINT, 0x0e);
     serial_puts("genesis: kernel booted\n");
+    serial_puts(BOOT_HINT "\n");
     link_init();
     keyboard_drain();
     timer_start();

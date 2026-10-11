@@ -355,6 +355,8 @@ static void collect_files(void) {
     }
 }
 
+static void draw_bar(void);
+
 static void draw_home_ui(void) {
     fill(0, 0, FB_W, FB_H, BG);
     text(48, 28, "genesis", YELLOW, 2);
@@ -365,6 +367,88 @@ static void draw_home_ui(void) {
         fill(24, y, FB_W - 48, home_band - 8, frame);
         fill(28, y + 4, FB_W - 56, home_band - 16, PAPER);
         text(48, y + 28, home_label(i), INK, 2);
+    }
+    draw_bar();
+}
+
+/* Command bar under the buttons: prompt, typed text, blinking cursor. */
+enum { BAR_X = 24, BAR_Y = 680, BAR_H = 80, BAR_TEXT_X = 40, CHAR_W = 18 };
+void desktop_run(const char *cmd, char *out, unsigned int size);
+static char bar_cmd[64];
+static int bar_len;
+static char bar_out[96];
+static int blink_on = 1;
+static unsigned int blink_ticks;
+static volatile int blink_due;
+
+static int utf8_chars(const char *s) {
+    int n = 0;
+    for (; *s; s++) {
+        if (!utf8_is_cont((unsigned char)*s)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void draw_bar_cursor(void) {
+    int x = BAR_TEXT_X + (9 + utf8_chars(bar_cmd)) * CHAR_W;
+    fill(x, BAR_Y + 10, 14, 18, blink_on ? YELLOW : PAPER);
+}
+
+static void draw_bar(void) {
+    fill(BAR_X, BAR_Y, FB_W - 2 * BAR_X, BAR_H, YELLOW);
+    fill(BAR_X + 4, BAR_Y + 4, FB_W - 2 * BAR_X - 8, BAR_H - 8, PAPER);
+    text(BAR_TEXT_X, BAR_Y + 12, "genesis> ", YELLOW, 2);
+    text(BAR_TEXT_X + 9 * CHAR_W, BAR_Y + 12, bar_cmd, INK, 2);
+    text(BAR_TEXT_X, BAR_Y + 48, bar_out[0] ? bar_out : "Введите команду и нажмите Enter (help)", FRAME, 2);
+    draw_bar_cursor();
+}
+
+static void bar_key(char ch) {
+    unsigned char u = (unsigned char)ch;
+    if (ch == '\n') {
+        if (bar_len == 0) {
+            return;
+        }
+        if ((bar_cmd[0] == 'e' && bar_cmd[1] == 'd' && bar_cmd[2] == 'i' && bar_cmd[3] == 't') ||
+            (bar_cmd[0] == 'd' && bar_cmd[1] == 'e' && bar_cmd[2] == 's' && bar_cmd[3] == 'k')) {
+            const char *msg = "edit/desktop: кнопки выше";
+            int k = 0;
+            while (msg[k] && k + 1 < (int)sizeof bar_out) {
+                bar_out[k] = msg[k];
+                k++;
+            }
+            bar_out[k] = 0;
+        } else {
+            desktop_run(bar_cmd, bar_out, sizeof bar_out);
+        }
+        bar_len = 0;
+        bar_cmd[0] = 0;
+    } else if (ch == '\b') {
+        if (bar_len == 0) {
+            return;
+        }
+        bar_len--;
+        while (bar_len > 0 && utf8_is_cont((unsigned char)bar_cmd[bar_len])) {
+            bar_len--;
+        }
+        bar_cmd[bar_len] = 0;
+    } else {
+        if (u < 32 || u == 127 || bar_len + 1 >= (int)sizeof bar_cmd) {
+            return;
+        }
+        if (u >= 0xc0 && bar_len + 5 >= (int)sizeof bar_cmd) {
+            return;
+        }
+        bar_cmd[bar_len++] = ch;
+        bar_cmd[bar_len] = 0;
+    }
+    if (desktop_on && view == VIEW_HOME) {
+        blink_on = 1;
+        cursor_erase();
+        draw_bar();
+        cursor_paint();
     }
 }
 
@@ -739,6 +823,9 @@ void desktop_key(char ch) {
     if (view == VIEW_EDITOR) {
         editor_key(ch);
     }
+    if (view == VIEW_HOME) {
+        bar_key(ch);
+    }
 }
 
 static inline void outb(unsigned short port, unsigned char value) {
@@ -814,6 +901,10 @@ void timer_tick(void) {
     if (!desktop_on) {
         return; /* the PIT also drives the scheduler; the clock is a desktop thing */
     }
+    if (++blink_ticks >= 50) {
+        blink_ticks = 0;
+        blink_due = 1;
+    }
     clock_ticks++;
     if (clock_ticks < 100) {
         return;
@@ -824,6 +915,15 @@ void timer_tick(void) {
 }
 
 void clock_service(void) {
+    if (blink_due) {
+        blink_due = 0;
+        blink_on ^= 1;
+        if (desktop_on && view == VIEW_HOME) {
+            cursor_erase();
+            draw_bar_cursor();
+            cursor_paint();
+        }
+    }
     if (!clock_due) {
         return;
     }
