@@ -34,8 +34,12 @@ test(
       await first.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "edit readme");
       await first.waitForSerial("edit: welcome to genesis", DEFAULT_TIMEOUT_MS);
+      // Full-screen editor: the text goes in at the cursor (start of file).
       await typeLine(first, "kept text");
+      await first.qmp("send-key", { keys: [{ type: "qcode", data: "ctrl" }, { type: "qcode", data: "s" }] });
       await first.waitForSerial("edit: saved", DEFAULT_TIMEOUT_MS);
+      await first.sendKey("esc");
+      await first.waitForSerial("edit: closed", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "write note still here");
       await first.waitForSerial("write: note", DEFAULT_TIMEOUT_MS);
     } finally {

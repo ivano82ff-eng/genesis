@@ -227,6 +227,8 @@ export async function startGuest(options: {
   const diskPath =
     options.diskPath ??
     path.join(os.tmpdir(), `genesis-disk-${process.pid}-${Date.now()}.img`);
+  // A disk we made up ourselves is scratch: remove it on stop so test runs do not fill /tmp.
+  const scratchDisk = options.diskPath == null;
   await ensureDisk(diskPath);
   // Windows QEMU cannot write into the WSL /tmp reliably; keep the dump next to the disk.
   const screenPath = windowsQemu
@@ -437,6 +439,9 @@ export async function startGuest(options: {
       if (exitCode != null || child.signalCode != null) {
         await unlink(sockPath).catch(() => undefined);
         await unlink(screenPath).catch(() => undefined);
+      if (scratchDisk) {
+        await unlink(diskPath).catch(() => undefined);
+      }
         return;
       }
       if (windowsQemu) {
@@ -453,6 +458,9 @@ export async function startGuest(options: {
       });
       await unlink(sockPath).catch(() => undefined);
       await unlink(screenPath).catch(() => undefined);
+      if (scratchDisk) {
+        await unlink(diskPath).catch(() => undefined);
+      }
     },
   };
 
