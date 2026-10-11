@@ -20,7 +20,22 @@ enum {
     C_NUMBER = 0x0b, C_GUTTER = 0x08, C_STATUS = 0x70, C_EMPTY = 0x01,
 };
 
-static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
+/* On the desktop (framebuffer mode) the editor draws into a shadow screen
+ * that desktop.c paints with its own font; otherwise into VGA text memory. */
+static unsigned short shadow[80 * 25];
+static volatile unsigned short *VGA = (volatile unsigned short *)0xb8000;
+static int cur_row, cur_col;
+int desktop_active(void);
+void desktop_editor_paint(void);
+
+const unsigned short *editor_screen(void) {
+    return shadow;
+}
+
+void editor_cursor(int *row, int *col) {
+    *row = cur_row;
+    *col = cur_col;
+}
 
 static int active;
 static char name[FS_NAME];
@@ -195,6 +210,11 @@ static unsigned int line_end(unsigned int at) {
 }
 
 static void hw_cursor(int row, int col) {
+    cur_row = row;
+    cur_col = col;
+    if (VGA == shadow) {
+        return;
+    }
     unsigned short pos = (unsigned short)(row * COLS + col);
     ed_outb(0x3d4, 0x0a);
     ed_outb(0x3d5, 0x0d);
@@ -274,6 +294,9 @@ static void render(void) {
     status[k] = 0;
     put_str(ROWS - 1, 0, status, C_STATUS);
     hw_cursor(cline - top, GUTTER + ccol - left);
+    if (VGA == shadow) {
+        desktop_editor_paint();
+    }
 }
 
 static void insert(char ch) {
@@ -452,6 +475,7 @@ int editor_open(const char *file) {
         console_puts(line);
     }
     active = 1;
+    VGA = desktop_active() ? shadow : (volatile unsigned short *)0xb8000;
     render();
     return 1;
 }

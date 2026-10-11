@@ -18,6 +18,7 @@ enum { COM1 = 0x3f8, VGA_COLS = 80, VGA_ROWS = 25, VGA_ATTR = 0x0f };
 int desktop_active(void);
 void desktop_key(char ch);
 void cmd_desktop(void);
+void desktop_set_size(int w, int h);
 void desktop_mouse(int x, int y, int left);
 void mouse_arm(void);
 int disk_load(void);
@@ -391,6 +392,11 @@ static int kbd_ctrl;
 static int kbd_alt;
 #define KEY_UP ((char)1)
 #define KEY_DOWN ((char)2)
+#define DESK_UP ((char)1)
+#define DESK_DOWN ((char)2)
+#define DESK_LEFT ((char)3)
+#define DESK_RIGHT ((char)4)
+#define DESK_ESC ((char)27)
 static int kbd_count;
 
 static void ps2_lock(unsigned long *flags) {
@@ -453,8 +459,13 @@ static void mouse_flush(void) {
     desktop_mouse(x, y, left);
 }
 
+void desktop_layout_changed(void);
+
 static void layout_toggle(void) {
     kbd_ru ^= 1;
+    if (desktop_active()) {
+        desktop_layout_changed();
+    }
     if (!desktop_active() && !editor_active()) {
         layout_indicator();
     }
@@ -522,6 +533,11 @@ static void ps2_apply(void) {
                 }
                 continue;
             }
+            /* On the desktop the arrows move history (up/down) and cell focus. */
+            if (desktop_active() && (b == 0x48 || b == 0x50 || b == 0x4b || b == 0x4d)) {
+                desktop_key(b == 0x48 ? DESK_UP : b == 0x50 ? DESK_DOWN : b == 0x4b ? DESK_LEFT : DESK_RIGHT);
+                continue;
+            }
             /* Outside the editor: arrow up/down drive shell history. */
             if ((b == 0x48 || b == 0x50) && !desktop_active()) {
                 shell_input(b == 0x48 ? KEY_UP : KEY_DOWN);
@@ -560,6 +576,14 @@ static void ps2_apply(void) {
         }
         if (editor_active() && (b == 0x01 || b == 0x0f)) {
             editor_key(b == 0x01 ? ED_QUIT : ED_TAB);
+            continue;
+        }
+        if (b == 0x0f) {
+            deliver('\t'); /* Tab: completion (shell, bar) or cell focus */
+            continue;
+        }
+        if (b == 0x01 && desktop_active()) {
+            desktop_key(DESK_ESC);
             continue;
         }
         if ((b & 0x80) != 0) {
@@ -659,7 +683,7 @@ static char *cap_buf;
 static unsigned int cap_len;
 static int cap_on;
 
-static char desk_cap[96];
+static char desk_cap[2048];
 static unsigned int desk_cap_len;
 static int desk_cap_on;
 
@@ -673,7 +697,7 @@ void console_putc(char ch) {
     }
     serial_putc(ch);
     if (desk_cap_on && desk_cap_len + 1 < sizeof desk_cap) {
-        desk_cap[desk_cap_len++] = ch == '\n' ? ' ' : ch;
+        desk_cap[desk_cap_len++] = ch;
         desk_cap[desk_cap_len] = 0;
     }
     if (!desktop_active() && !editor_active()) {
@@ -1300,6 +1324,8 @@ extern const unsigned char hello_bin[];
 extern const unsigned char hello_bin_end[];
 extern const unsigned char ticker_bin[];
 extern const unsigned char ticker_bin_end[];
+extern const unsigned char pulse_bin[];
+extern const unsigned char pulse_bin_end[];
 extern const unsigned char open_bin[];
 extern const unsigned char open_bin_end[];
 extern const unsigned char vtxt_bin[];
@@ -1352,6 +1378,7 @@ static void fs_seed(void) {
     fs_seed_blob("/bin/vpdf", vpdf_bin, vpdf_bin_end);
     fs_seed_blob("/bin/vmp4", vmp4_bin, vmp4_bin_end);
     fs_seed_blob("/bin/ticker", ticker_bin, ticker_bin_end);
+    fs_seed_blob("/bin/pulse", pulse_bin, pulse_bin_end);
     fs_seed_blob("/docs/note.txt", sample_note_txt, sample_note_txt_end);
     fs_seed_blob("/docs/note.docx", sample_note_docx, sample_note_docx_end);
     fs_seed_blob("/docs/pic.png", sample_pic_png, sample_pic_png_end);
@@ -1363,7 +1390,7 @@ static void fs_seed(void) {
 /* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
 int fs_builtin_name(const char *name) {
     static const char *const names[] = {"readme", "hello", "open", "vtxt", "vdocx", "vimg", "vpdf",
-                                        "vmp4", "ticker", "note.txt", "note.docx", "pic.png",
+                                        "vmp4", "ticker", "pulse", "note.txt", "note.docx", "pic.png",
                                         "pic.jpg", "note.pdf", "clip.mp4"};
     for (unsigned int i = 0; i < sizeof names / sizeof names[0]; i++) {
         if (str_eq(name, names[i])) {
@@ -1480,7 +1507,13 @@ int fs_put(const char *name, const char *data, unsigned int length) {
     return fs_add(name, data, length) && disk_save();
 }
 
+void desktop_editor_closed(void);
+
 void editor_closed(void) {
+    if (desktop_active()) {
+        desktop_editor_closed();
+        return;
+    }
     vga_show_cursor();
     vga_clear();
     type_row = 0;
@@ -1821,6 +1854,288 @@ static void cmd_heap(void) {
     console_putc('\n');
 }
 
+int task_kill(int id);
+int task_count(void);
+
+static void cmd_kill(const char *arg) {
+    unsigned int id = 0;
+    while (*arg == ' ') {
+        arg++;
+    }
+    if (!parse_u32(arg, &id)) {
+        console_puts("kill: need a task number (see ps)\n");
+        return;
+    }
+    int r = task_kill((int)id);
+    if (r < 0) {
+        console_puts("kill: the shell cannot be stopped\n");
+        return;
+    }
+    console_puts(r ? "kill: stopped task " : "kill: no task ");
+    print_u32(id);
+    console_putc('\n');
+}
+
+/* Pinned folders: one absolute path per line in /home/.pins. */
+#define PINS_FILE "/home/.pins"
+enum { PINS_MAX = 5 };
+
+int pins_get(int index, char *out, unsigned int cap) {
+    struct ram_file *f = fs_find_abs(PINS_FILE);
+    if (f == 0) {
+        return 0;
+    }
+    int line_no = 0;
+    unsigned int i = 0;
+    while (i < f->length) {
+        unsigned int s = i;
+        while (i < f->length && f->data[i] != '\n') {
+            i++;
+        }
+        if (i > s && line_no++ == index) {
+            unsigned int n = 0;
+            while (s + n < i && n + 1 < cap) {
+                out[n] = (char)f->data[s + n];
+                n++;
+            }
+            out[n] = 0;
+            return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static void cmd_pin(const char *arg, int add) {
+    char abs[FS_NAME];
+    while (*arg == ' ') {
+        arg++;
+    }
+    if (*arg == 0 || !fs_resolve(arg, abs)) {
+        console_puts(add ? "pin: need a folder\n" : "unpin: need a folder\n");
+        return;
+    }
+    char text[PINS_MAX * FS_NAME + PINS_MAX];
+    unsigned int n = 0;
+    int found = 0;
+    int count = 0;
+    char one[FS_NAME];
+    for (int i = 0; pins_get(i, one, sizeof one); i++) {
+        if (str_eq(one, abs)) {
+            found = 1;
+            if (!add) {
+                continue;
+            }
+        }
+        for (const char *c = one; *c != 0; c++) {
+            text[n++] = *c;
+        }
+        text[n++] = '\n';
+        count++;
+    }
+    if (add) {
+        if (found) {
+            console_puts("pin: already pinned\n");
+            return;
+        }
+        if (!fs_is_dir_abs(abs)) {
+            console_puts("pin: not a folder\n");
+            return;
+        }
+        if (count >= PINS_MAX) {
+            console_puts("pin: at most 5 pins\n");
+            return;
+        }
+        for (const char *c = abs; *c != 0; c++) {
+            text[n++] = *c;
+        }
+        text[n++] = '\n';
+    } else if (!found) {
+        console_puts("unpin: not pinned\n");
+        return;
+    }
+    if (!fs_put_abs(PINS_FILE, text, n)) {
+        console_puts("pin: cannot write " PINS_FILE "\n");
+        return;
+    }
+    if (!disk_save()) {
+        console_puts("disk: io failed\n");
+    }
+    console_puts(add ? "pin: " : "unpin: ");
+    console_puts(abs);
+    console_putc('\n');
+}
+
+int heap_percent(void) {
+    return (int)((unsigned long)heap_used * 100ul / HEAP_SIZE);
+}
+
+unsigned int heap_used_kib(void) {
+    return heap_used / 1024u;
+}
+
+int fs_file_count(void) {
+    int n = 0;
+    for (int i = 0; i < FS_MAX; i++) {
+        if (ramfs[i].used && !ramfs[i].dir) {
+            n++;
+        }
+    }
+    return n;
+}
+
+const char *shell_cwd(void) {
+    return cwd;
+}
+
+void kbd_toggle_layout(void) {
+    layout_toggle();
+}
+
+/* ---- Tab completion: commands for the first word, paths after it ---- */
+static const char *const sh_words[] = {
+    "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
+    "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
+    "unpin", "poweroff", "reboot", "ping", "say", "sh", "set", "grep", "wc", "head",
+};
+
+static unsigned int cand_used;
+
+static void cand_add(char *cands, unsigned int cap, const char *word, int dir) {
+    if (cand_used != 0 && cand_used + 1 < cap) {
+        cands[cand_used++] = ' ';
+    }
+    for (const char *c = word; *c != 0 && cand_used + 1 < cap; c++) {
+        cands[cand_used++] = *c;
+    }
+    if (dir && cand_used + 1 < cap) {
+        cands[cand_used++] = '/';
+    }
+    cands[cand_used] = 0;
+}
+
+/* Completes the last word of TEXT (LEN bytes, CAP room) in place. Returns how
+ * many names matched; CANDS gets them, space separated, when there are several. */
+int sh_complete(char *text, int *len, int cap, char *cands, unsigned int cands_cap) {
+    int n = *len;
+    int start = n;
+    while (start > 0 && text[start - 1] != ' ' && text[start - 1] != '|' && text[start - 1] != ';' &&
+           text[start - 1] != '&' && text[start - 1] != '>') {
+        start--;
+    }
+    int first = 1;
+    for (int k = start - 1; k >= 0; k--) {
+        char c = text[k];
+        if (c == '|' || c == ';' || c == '&') {
+            break;
+        }
+        if (c != ' ') {
+            first = 0;
+            break;
+        }
+    }
+    const char *word = text + start;
+    int wlen = n - start;
+    char best[FS_NAME];
+    int best_len = -1;
+    int best_dir = 0;
+    int matches = 0;
+    cand_used = 0;
+    cands[0] = 0;
+    int slash = -1;
+    for (int k = 0; k < wlen; k++) {
+        if (word[k] == '/') {
+            slash = k;
+        }
+    }
+    const char *prefix = word + slash + 1;
+    int plen = wlen - slash - 1;
+    if (first && slash < 0) {
+        for (unsigned int w = 0; w < sizeof sh_words / sizeof sh_words[0]; w++) {
+            const char *cand = sh_words[w];
+            int k = 0;
+            while (k < plen && cand[k] == prefix[k]) {
+                k++;
+            }
+            if (k < plen) {
+                continue;
+            }
+            matches++;
+            cand_add(cands, cands_cap, cand, 0);
+            if (best_len < 0) {
+                best_len = (int)str_len(cand);
+                for (int j = 0; j <= best_len; j++) {
+                    best[j] = cand[j];
+                }
+            } else {
+                int j = 0;
+                while (j < best_len && best[j] == cand[j]) {
+                    j++;
+                }
+                best_len = j;
+            }
+        }
+    } else {
+        char dir_text[FS_NAME];
+        char abs[FS_NAME];
+        int d = 0;
+        if (slash == 0) {
+            dir_text[d++] = '/';
+        }
+        for (int k = 0; k < slash && d + 1 < FS_NAME; k++) {
+            dir_text[d++] = word[k];
+        }
+        dir_text[d] = 0;
+        if (!fs_resolve(d == 0 ? "." : dir_text, abs)) {
+            return 0;
+        }
+        for (int i = 0; i < FS_MAX; i++) {
+            char name[FS_PART + 1];
+            int is_dir = 0;
+            if (!fs_dir_entry(i, abs, name, sizeof name, &is_dir)) {
+                continue;
+            }
+            int k = 0;
+            while (k < plen && name[k] == prefix[k]) {
+                k++;
+            }
+            if (k < plen || (name[0] == '.' && plen == 0)) {
+                continue;
+            }
+            matches++;
+            cand_add(cands, cands_cap, name, is_dir);
+            if (best_len < 0) {
+                best_len = (int)str_len(name);
+                for (int j = 0; j <= best_len; j++) {
+                    best[j] = name[j];
+                }
+                best_dir = is_dir;
+            } else {
+                int j = 0;
+                while (j < best_len && best[j] == name[j]) {
+                    j++;
+                }
+                best_len = j;
+            }
+        }
+    }
+    if (matches == 0) {
+        return 0;
+    }
+    for (int j = plen; j < best_len && n + 2 < cap; j++) {
+        text[n++] = best[j];
+    }
+    if (matches == 1 && n + 2 < cap) {
+        text[n++] = best_dir ? '/' : ' ';
+    }
+    text[n] = 0;
+    *len = n;
+    if (matches == 1) {
+        cands[0] = 0;
+    }
+    return matches;
+}
+
 static void execute(char *input) {
     trim(input);
     if (input[0] == 0) {
@@ -1831,6 +2146,7 @@ static void execute(char *input) {
         console_puts("folders: pwd cd mkdir rmdir mv cp  paths: /docs/note.txt ../x ./y\n");
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
+        console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -1917,7 +2233,38 @@ static void execute(char *input) {
         cmd_ps();
         return;
     }
-    if (str_eq(input, "desktop")) {
+    if (str_eq(input, "kill") || starts_with(input, "kill ")) {
+        cmd_kill(input[4] == ' ' ? input + 5 : "");
+        return;
+    }
+    if (str_eq(input, "pin") || starts_with(input, "pin ")) {
+        cmd_pin(input[3] == ' ' ? input + 4 : "", 1);
+        return;
+    }
+    if (str_eq(input, "unpin") || starts_with(input, "unpin ")) {
+        cmd_pin(input[5] == ' ' ? input + 6 : "", 0);
+        return;
+    }
+    if (str_eq(input, "desktop") || starts_with(input, "desktop ")) {
+        /* desktop WxH: e.g. 480x800 (phone), 1920x1080 (TV) */
+        unsigned int w = 0;
+        unsigned int h = 0;
+        const char *arg = input + 7;
+        while (*arg == ' ') {
+            arg++;
+        }
+        while (*arg >= '0' && *arg <= '9') {
+            w = w * 10u + (unsigned int)(*arg++ - '0');
+        }
+        if (*arg == 'x' || *arg == 'X') {
+            arg++;
+            while (*arg >= '0' && *arg <= '9') {
+                h = h * 10u + (unsigned int)(*arg++ - '0');
+            }
+        }
+        if (w != 0 || h != 0) {
+            desktop_set_size((int)w, (int)h);
+        }
         cmd_desktop();
         return;
     }
@@ -2550,6 +2897,24 @@ static void shell_input(char ch) {
         if (hist_pos < hist_count) {
             hist_pos++;
             line_load(hist_pos < hist_count ? hist[hist_pos] : "");
+        }
+        return;
+    }
+    if (ch == '\t') {
+        char cands[256];
+        int before = line_len;
+        line[line_len] = 0;
+        int found = sh_complete(line, &line_len, LINE_MAX, cands, sizeof cands);
+        for (int k = before; k < line_len; k++) {
+            console_putc(line[k]);
+        }
+        if (found > 1 && line_len == before) {
+            console_putc('\n');
+            console_puts(cands);
+            console_putc('\n');
+            prompt();
+            line[line_len] = 0;
+            console_puts(line);
         }
         return;
     }
