@@ -41,7 +41,7 @@ test(
       await typeLine(first, "rm alpha");
       await first.waitForSerial("rm: alpha", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "cat alpha");
-      await first.waitForSerial("rm: no such file", DEFAULT_TIMEOUT_MS);
+      await first.waitForSerial("cat: no such file", DEFAULT_TIMEOUT_MS);
     } finally {
       await first.stop();
     }
@@ -55,7 +55,7 @@ test(
       await second.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
       await second.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat alpha");
-      await second.waitForSerial("rm: no such file", DEFAULT_TIMEOUT_MS);
+      await second.waitForSerial("cat: no such file", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat readme");
       await second.waitForSerial("cat: welcome to genesis", DEFAULT_TIMEOUT_MS);
     } finally {
@@ -133,8 +133,8 @@ test(
       await expect("cat f3", "cat: a3");
       await expect("cat g1", "cat: b1");
       await expect("cat g2", "cat: b2");
-      await expect("cat f2", "rm: no such file");
-      await expect("cat f4", "rm: no such file");
+      await expect("cat f2", "cat: no such file");
+      await expect("cat f4", "cat: no such file");
       await expect("cat readme", "cat: welcome to genesis");
     } finally {
       await second.stop();
