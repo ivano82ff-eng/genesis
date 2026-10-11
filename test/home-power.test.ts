@@ -9,6 +9,7 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { click, countOf, delay, typeLine } from "./helpers.js";
+import { CELL, settingsButton } from "./ui.js";
 
 test(
   "home poweroff exits QEMU and reboot returns to the home screen",
@@ -26,7 +27,9 @@ test(
       await off.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(off, "desktop");
       await off.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await click(off, 200, 640);
+      await click(off, CELL.settings.x, CELL.settings.y);
+      await off.waitForSerial("Назад", DEFAULT_TIMEOUT_MS);
+      await click(off, settingsButton(2).x, settingsButton(2).y);
       await off.waitForSerial("poweroff", DEFAULT_TIMEOUT_MS);
       await off.waitUntilClosed();
     } finally {
@@ -39,7 +42,9 @@ test(
       await typeLine(again, "desktop");
       await again.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       assert.equal(countOf(again.serial, BOOT_MARKER), 1);
-      await click(again, 200, 510);
+      await click(again, CELL.settings.x, CELL.settings.y);
+      await again.waitForSerial("Назад", DEFAULT_TIMEOUT_MS);
+      await click(again, settingsButton(1).x, settingsButton(1).y);
       const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
       while (countOf(again.serial, "home: ready") < 2 || countOf(again.serial, BOOT_MARKER) < 2) {
         if (Date.now() > deadline) {

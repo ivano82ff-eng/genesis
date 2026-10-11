@@ -7,7 +7,8 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { delay, typeLine } from "./helpers.js";
+import { click, typeLine } from "./helpers.js";
+import { CELL } from "./ui.js";
 
 test(
   "window key events type into the editor",
@@ -24,22 +25,15 @@ test(
       await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      let top = 320;
-      while (top > 0) {
-        const step = Math.min(40, top);
-        await guest.monitor(`mouse_move 0 ${step}`);
-        top -= step;
-        await delay(200);
-      }
-      await guest.monitor("mouse_move 200 0");
-      await delay(200);
-      await guest.monitor("mouse_button 1");
-      await delay(80);
-      await guest.monitor("mouse_button 0");
+      await click(guest, CELL.editor.x, CELL.editor.y);
       await guest.waitForSerial("edit: welcome to genesis", DEFAULT_TIMEOUT_MS);
+      // The full-screen editor: type a line, Ctrl+S saves (18 + "hi\n").
       await typeLine(guest, "hi");
-      await guest.waitForSerial("edit: saved", DEFAULT_TIMEOUT_MS);
-      assert.match(guest.serial, /hi[\s\S]*edit: saved/);
+      await guest.qmp("send-key", { keys: [{ type: "qcode", data: "ctrl" }, { type: "qcode", data: "s" }] });
+      await guest.waitForSerial("edit: saved /home/readme (21 bytes)", DEFAULT_TIMEOUT_MS);
+      await guest.sendKey("esc");
+      await guest.waitForSerial("edit: closed", DEFAULT_TIMEOUT_MS);
+      assert.ok(guest.serial.indexOf("edit: closed") > guest.serial.indexOf("edit: saved"));
     } finally {
       await guest.stop();
     }

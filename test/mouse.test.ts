@@ -10,6 +10,7 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { delay, pixel, typeLine } from "./helpers.js";
+import { CELL } from "./ui.js";
 
 function isYellow([r, g, b]: [number, number, number]): boolean {
   return r > 180 && g > 140 && b < 120;
@@ -37,10 +38,16 @@ test(
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
 
       const before = parsePpm(await guest.screendump());
-      assert.equal(isYellow(pixel(before, 40, 482)), true);
+      let prompt = false;
+      for (let x = 32; x < 200 && !prompt; x++) {
+        for (let y = 694; y < 712 && !prompt; y++) {
+          prompt = isYellow(pixel(before, x, y));
+        }
+      }
+      assert.equal(prompt, true, "нет жёлтого приглашения в строке команд");
 
-      let left = 200;
-      let top = 110;
+      let left = CELL.memory.x;
+      let top = CELL.memory.y;
       while (left > 0 || top > 0) {
         const stepX = Math.min(40, left);
         const stepY = Math.min(40, top);
