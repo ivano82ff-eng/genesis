@@ -21,7 +21,7 @@ test(
     const image = await buildImage();
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "poweroff");
       await guest.waitForSerial("poweroff", DEFAULT_TIMEOUT_MS);
       await Promise.race([
@@ -49,7 +49,7 @@ test(
     try {
       await guest.waitForSerial(BOOT_MARKER, DEFAULT_TIMEOUT_MS);
       assert.equal(countOf(guest.serial, BOOT_MARKER), 1);
-      await guest.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "reboot");
       const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
       while (countOf(guest.serial, BOOT_MARKER) < 2) {

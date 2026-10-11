@@ -17,14 +17,14 @@ test("files from an import folder land on the genesis disk", { timeout: 180_000 
   const folder = path.join(dir, "import");
   await mkdir(folder);
   await writeFile(path.join(folder, "my.txt"), "hello-import\nПривет, genesis\n");
-  await writeFile(path.join(folder, "this-name-is-too-long.txt"), "x");
-  await writeFile(path.join(folder, "big.txt"), Buffer.alloc(70_000, 0x61));
+  await writeFile(path.join(folder, "this-name-is-much-too-long-for-genesis.txt"), "x");
+  await writeFile(path.join(folder, "big.txt"), Buffer.alloc(1_100_000, 0x61));
   const disk = path.join(dir, "disk.img");
 
   // Blank disk: the importer creates the store, the kernel adds built-ins.
   const first = await importFolder(disk, folder);
   assert.deepEqual(first.imported, ["my.txt"]);
-  assert.deepEqual(first.skipped.map((s) => s.name).sort(), ["big.txt", "this-name-is-too-long.txt"]);
+  assert.deepEqual(first.skipped.map((s) => s.name).sort(), ["big.txt", "this-name-is-much-too-long-for-genesis.txt"]);
 
   const image = await buildImage();
   const boot = async () => startGuest({ isoPath: image.isoPath, display: "none", diskPath: disk, boot: "cd" });
@@ -35,12 +35,13 @@ test("files from an import folder land on the genesis disk", { timeout: 180_000 
 
   const g1 = await boot();
   try {
-    await g1.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+    await g1.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
     await ask(g1, "ls", "my.txt");
     await ask(g1, "cat my.txt", "cat: hello-import");
     await g1.waitForSerial("Привет, genesis", DEFAULT_TIMEOUT_MS);
     await ask(g1, "cat readme", "cat: welcome to genesis");
-    await ask(g1, "ls", "ticker");
+    await ask(g1, "ls /bin", "ticker");
+    await ask(g1, "cat /home/my.txt", "cat: hello-import");
     await ask(g1, "write keep kept", "write: keep");
   } finally {
     await g1.stop();
@@ -51,7 +52,7 @@ test("files from an import folder land on the genesis disk", { timeout: 180_000 
   assert.deepEqual(second.imported, ["my.txt"]);
   const g2 = await boot();
   try {
-    await g2.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+    await g2.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
     await ask(g2, "cat my.txt", "cat: second-version");
     await ask(g2, "cat keep", "cat: kept");
     await ask(g2, "cat readme", "cat: welcome to genesis");

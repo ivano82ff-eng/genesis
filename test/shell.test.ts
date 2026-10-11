@@ -11,7 +11,7 @@ import {
 import { screenTextError } from "../src/vga-text.js";
 import { delay } from "./helpers.js";
 
-const PROMPT = "genesis> ";
+const PROMPT = "genesis:/home> ";
 const HELP_REPLY = "commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop";
 
 test(

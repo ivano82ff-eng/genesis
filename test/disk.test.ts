@@ -31,7 +31,7 @@ test(
       diskPath: disk,
     });
     try {
-      await first.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await first.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(first, "write note persist me");
       await first.waitForSerial("write: note", DEFAULT_TIMEOUT_MS);
     } finally {
@@ -44,7 +44,7 @@ test(
       diskPath: disk,
     });
     try {
-      await second.waitForSerial("genesis> ", DEFAULT_TIMEOUT_MS);
+      await second.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat note");
       await second.waitForSerial("cat: persist me", DEFAULT_TIMEOUT_MS);
       await typeLine(second, "cat readme");
