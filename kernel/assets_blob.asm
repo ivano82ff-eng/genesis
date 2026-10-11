@@ -13,6 +13,12 @@ ticker_bin:
 incbin "build/ticker.bin"
 ticker_bin_end:
 
+global pulse_bin
+global pulse_bin_end
+pulse_bin:
+incbin "build/pulse.bin"
+pulse_bin_end:
+
 global open_bin
 global open_bin_end
 open_bin:

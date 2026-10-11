@@ -492,3 +492,35 @@ void *pkg_sym(const char *lib, const char *sym) {
     lib_lookup_fn lookup = (lib_lookup_fn)(void *)(code + 4);
     return lookup(sym, pkg_sym);
 }
+
+/* For the desktop: the INDEX-th package, whether it is installed and
+ * whether it is a program (its blob is not a GLIB library). */
+int pkg_info(int index, char *name, unsigned int cap, int *installed, int *app) {
+    char buf[LINE_CAP];
+    char *t[TOK_MAX];
+    int c;
+    unsigned int pos = 0;
+    int seen = 0;
+    while (next_line(&pos, buf, t, &c)) {
+        if (c < 4 || t[0][0] != 'P') {
+            continue;
+        }
+        if (seen++ != index) {
+            continue;
+        }
+        s_copy(name, t[1], cap);
+        *installed = pkg_installed(name);
+        *app = 0;
+        unsigned int p2 = 0;
+        while (next_line(&p2, buf, t, &c)) {
+            if (c >= 5 && t[0][0] == 'F' && s_eq(t[1], name)) {
+                const unsigned char *b = blob_base() + s_num(t[3]);
+                if (!(s_num(t[4]) >= 4 && b[0] == 'G' && b[1] == 'L' && b[2] == 'I' && b[3] == 'B')) {
+                    *app = 1;
+                }
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
