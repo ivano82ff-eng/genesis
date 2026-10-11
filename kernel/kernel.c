@@ -1134,8 +1134,9 @@ static void execute(char *input) {
         return;
     }
     if (str_eq(input, "help")) {
-        console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps pkg desktop\n");
+        console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
+        console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         return;
     }
     if (str_eq(input, "clear")) {
