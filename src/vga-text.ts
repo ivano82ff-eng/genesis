@@ -1,4 +1,5 @@
 /** Glyphs from QEMU's std VGA text mode, 8×16 inside a 9×16 cell, 720×400. */
+import { readFileSync } from "node:fs";
 import { parsePpm, type RgbImage } from "./ppm.js";
 
 const CELL_W = 9;
@@ -29,6 +30,25 @@ const GLYPHS: Record<string, readonly number[]> = {
   u: [0x00, 0x00, 0x00, 0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00, 0x00, 0x00, 0x00],
   w: [0x00, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xc3, 0xc3, 0xdb, 0xdb, 0xff, 0x66, 0x00, 0x00, 0x00, 0x00],
 };
+
+/** Cyrillic cells come from kernel/cyr8x8.h: the kernel loads each 8x8 row twice. */
+let cyrillic: Record<string, number[]> | null = null;
+
+export function cyrillicGlyphs(): Record<string, number[]> {
+  if (cyrillic == null) {
+    const header = readFileSync(new URL("../../kernel/cyr8x8.h", import.meta.url), "utf8");
+    cyrillic = {};
+    for (const m of header.matchAll(/\{0x([0-9a-f]+), 0x[0-9a-f]+, \{([^}]*)\}\}/g)) {
+      const rows = m[2]!.split(",").map((v) => Number.parseInt(v.trim(), 16));
+      cyrillic[String.fromCodePoint(Number.parseInt(m[1]!, 16))] = rows.flatMap((r) => [r, r]);
+    }
+  }
+  return cyrillic;
+}
+
+function glyphFor(ch: string): readonly number[] | undefined {
+  return GLYPHS[ch] ?? cyrillicGlyphs()[ch];
+}
 
 type Image = RgbImage;
 
@@ -66,12 +86,12 @@ export function screenTextError(ppm: Buffer, text: string, row = 0): string | nu
   if (row < 0 || row >= 25) {
     return "строка вне экрана";
   }
-  if (text.length > 80) {
+  if ([...text].length > 80) {
     return "строка длиннее 80 столбцов";
   }
   for (let index = 0; index < text.length; index++) {
     const ch = text[index]!;
-    const expected = GLYPHS[ch];
+    const expected = glyphFor(ch);
     if (expected == null) {
       return `нет эталона глифа для «${ch}»`;
     }
@@ -85,7 +105,7 @@ export function screenTextError(ppm: Buffer, text: string, row = 0): string | nu
 
 /** True when `ch` is drawn in any text cell. */
 export function screenShowsChar(ppm: Buffer, ch: string): boolean {
-  const expected = GLYPHS[ch];
+  const expected = glyphFor(ch);
   if (expected == null) {
     return false;
   }
@@ -107,7 +127,7 @@ export function screenShowsChar(ppm: Buffer, ch: string): boolean {
 export function paintTextPpm(text: string): Buffer {
   const pixels = Buffer.alloc(SCREEN_W * SCREEN_H * 3);
   for (let index = 0; index < text.length; index++) {
-    const glyph = GLYPHS[text[index]!];
+    const glyph = glyphFor(text[index]!);
     if (glyph == null) {
       throw new Error(`нет глифа «${text[index]}»`);
     }
