@@ -8,13 +8,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
+import { delay, typeLine } from "./helpers.js";
 
 test(
   "the desktop clock changes between two captures",

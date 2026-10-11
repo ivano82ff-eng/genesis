@@ -9,15 +9,10 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { screenTextError } from "../src/vga-text.js";
+import { delay } from "./helpers.js";
 
 const PROMPT = "genesis> ";
-const HELP_REPLY = "commands: help echo clear mem alloc heap ls cat write run desktop";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
+const HELP_REPLY = "commands: help echo clear mem alloc heap ls cat write rm run desktop";
 
 test(
   "help replies on serial and on the VGA screen",
@@ -29,7 +24,7 @@ test(
     }
 
     const image = await buildImage();
-    const guest = await startGuest({ isoPath: image.isoPath, display: "gtk" });
+    const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
       await guest.waitForSerial(PROMPT, DEFAULT_TIMEOUT_MS);
       assert.match(guest.serial, new RegExp(BOOT_MARKER));

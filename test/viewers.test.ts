@@ -7,33 +7,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-async function click(guest: Guest, x: number, y: number): Promise<void> {
-  let left = x;
-  let top = y;
-  while (left > 0 || top > 0) {
-    const stepX = Math.min(40, left);
-    const stepY = Math.min(40, top);
-    await guest.monitor(`mouse_move ${stepX} ${stepY}`);
-    left -= stepX;
-    top -= stepY;
-    await delay(150);
-  }
-  try {
-    await guest.monitor("mouse_button 1");
-    await delay(80);
-    await guest.monitor("mouse_button 0");
-  } catch {
-    // viewer may keep the guest busy
-  }
-}
+import { click, delay, typeLine } from "./helpers.js";
 
 async function openRow(guest: Guest, rowY: number, expect: string): Promise<void> {
   await click(guest, 200, 420);

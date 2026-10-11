@@ -22,6 +22,8 @@ QEMU через `-kernel` не принимает 64-битный ELF (`Cannot l
 
 Команды из этого файла запускайте в WSL (Ubuntu), не в PowerShell. QEMU, GCC, GRUB и Node ставятся внутрь дистрибутива WSL. Снимки экрана открывают окно QEMU, поэтому нужен дисплей: в WSL это WSLg, и `echo $DISPLAY` не должен быть пустым. Это касается тестов VGA, команды `show` и кнопки «Запустить». Проверка одного только serial окно не открывает.
 
+Без WSLg (WSL 1, переменная $DISPLAY пуста) команда `show` (`npm run look`) сама запускает QEMU для Windows: `C:\Program Files\qemu\qemu-system-x86_64.exe` (поставить: `winget install SoftwareFreedomConservancy.QEMU`). Окно открывается на рабочем столе Windows, QMP идёт через TCP на 127.0.0.1. Другой бинарник QEMU можно задать переменной `GENESIS_QEMU`. Тесты по-прежнему используют QEMU внутри WSL без окна.
+
 ## Пакеты хоста
 
 Нужны Node.js 18 или новее (`node` и `npm` в `PATH`), а также NASM, GCC, Binutils, QEMU и GRUB для BIOS.

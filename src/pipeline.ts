@@ -143,6 +143,29 @@ export async function buildImage(): Promise<ImagePaths> {
     `-I${path.join(root, "programs")}`,
   ];
 
+  /* Kernel objects: like programs but small code model, all warnings fatal. */
+  const kernelCc = [
+    "-std=gnu11",
+    "-ffreestanding",
+    "-fno-stack-protector",
+    "-fno-pic",
+    "-fno-pie",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-unwind-tables",
+    "-mno-red-zone",
+    "-mgeneral-regs-only",
+    "-fcf-protection=none",
+    "-m64",
+    "-mcmodel=small",
+    "-Os",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ];
+
+  const compileKernel = (source: string, output: string): Promise<void> =>
+    exec("gcc", [...kernelCc, "-c", path.join(root, "kernel", source), "-o", output], root);
+
   await exec("nasm", ["-fbin", path.join(root, "programs", "hello.asm"), "-o", helloBin], root);
   const startObj = path.join(buildDir, "start.o");
   await exec("nasm", ["-felf64", path.join(root, "programs", "start.s"), "-o", startObj], root);
@@ -198,97 +221,13 @@ export async function buildImage(): Promise<ImagePaths> {
     root,
   );
 
-  await exec("gcc", [
-    "-std=gnu11",
-    "-ffreestanding",
-    "-fno-stack-protector",
-    "-fno-pic",
-    "-fno-pie",
-    "-fno-asynchronous-unwind-tables",
-    "-fno-unwind-tables",
-    "-mno-red-zone",
-    "-mgeneral-regs-only",
-    "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=small",
-    "-Os",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-c",
-    path.join(root, "kernel", "kernel.c"),
-    "-o",
-    kernelObj,
-  ], root);
+  await compileKernel("kernel.c", kernelObj);
 
-  await exec("gcc", [
-    "-std=gnu11",
-    "-ffreestanding",
-    "-fno-stack-protector",
-    "-fno-pic",
-    "-fno-pie",
-    "-fno-asynchronous-unwind-tables",
-    "-fno-unwind-tables",
-    "-mno-red-zone",
-    "-mgeneral-regs-only",
-    "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=small",
-    "-Os",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-c",
-    path.join(root, "kernel", "desktop.c"),
-    "-o",
-    desktopObj,
-  ], root);
+  await compileKernel("desktop.c", desktopObj);
 
-  await exec("gcc", [
-    "-std=gnu11",
-    "-ffreestanding",
-    "-fno-stack-protector",
-    "-fno-pic",
-    "-fno-pie",
-    "-fno-asynchronous-unwind-tables",
-    "-fno-unwind-tables",
-    "-mno-red-zone",
-    "-mgeneral-regs-only",
-    "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=small",
-    "-Os",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-c",
-    path.join(root, "kernel", "disk.c"),
-    "-o",
-    diskObj,
-  ], root);
+  await compileKernel("disk.c", diskObj);
 
-  await exec("gcc", [
-    "-std=gnu11",
-    "-ffreestanding",
-    "-fno-stack-protector",
-    "-fno-pic",
-    "-fno-pie",
-    "-fno-asynchronous-unwind-tables",
-    "-fno-unwind-tables",
-    "-mno-red-zone",
-    "-mgeneral-regs-only",
-    "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=small",
-    "-Os",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-c",
-    path.join(root, "kernel", "link.c"),
-    "-o",
-    linkObj,
-  ], root);
+  await compileKernel("link.c", linkObj);
 
   await exec("ld", [
     "-m",

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 
 type Phase = "empty" | "loading" | "error" | "ready";
 
@@ -52,9 +51,9 @@ export default function Home() {
         </p>
       </header>
 
-      <Button
-        size="lg"
-        className="w-full sm:w-fit"
+      <button
+        type="button"
+        className="inline-flex h-9 w-full items-center justify-center rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/80 disabled:pointer-events-none disabled:opacity-50 sm:w-fit"
         disabled={phase === "loading"}
         aria-busy={phase === "loading"}
         onClick={() => {
@@ -62,7 +61,7 @@ export default function Home() {
         }}
       >
         Запустить
-      </Button>
+      </button>
 
       <section
         aria-live="polite"

@@ -10,7 +10,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
+import { typeLine } from "./helpers.js";
 
 test(
   "an edited file is still on the disk after reboot",

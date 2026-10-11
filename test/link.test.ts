@@ -7,7 +7,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
+import { typeLine } from "./helpers.js";
 
 test(
   "say hello-link arrives on the other Genesis Link guest",

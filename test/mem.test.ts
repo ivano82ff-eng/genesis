@@ -8,7 +8,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
+import { typeLine } from "./helpers.js";
 
 test(
   "mem, alloc, and heap report the memory map",

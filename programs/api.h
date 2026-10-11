@@ -1,6 +1,8 @@
 #pragma once
 
 enum { GENESIS_FB_W = 1024, GENESIS_FB_H = 768 };
+/* Program BSS after the loaded image; the kernel zero-fills this much. */
+enum { GENESIS_PROG_HEAP = 256u * 1024u };
 
 struct genesis_api {
     void (*puts)(const char *text);

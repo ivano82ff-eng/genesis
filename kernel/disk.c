@@ -1,7 +1,32 @@
 #include "fs_limits.h"
 
+/*
+ * Genesis Grid Store (GBF1) — a flat block store, no directory tree.
+ *
+ * Disk layout, 512-byte sectors:
+ *   LBA 0            MBR written by install_system
+ *   LBA 32           superblock: "GBF1", u32 block_count, boot_flags byte, u32 free_count
+ *   LBA 33           allocation bitmap, one bit per 4 KiB block
+ *   LBA 34..37       flat catalog, up to FS_MAX entries of 84 bytes:
+ *                    name[16], u32 length, u32 chunks[16]
+ *   LBA 2048 + 8*b   data block b (4 KiB, 8 sectors)
+ *
+ * A file is a grid of up to 16 chunk numbers; 16 * 4 KiB = FS_DATA. Chunks
+ * are scattered freely across the store — the catalog assembles them.
+ *
+ * Saves are transactional: new chunks are allocated on a scratch bitmap and
+ * written to blocks that are still marked busy, so a failed save leaves the
+ * last committed state untouched. Metadata is written last, superblock last
+ * of all. A failed unlink can only leak blocks, never corrupt a file.
+ */
+
 enum { ATA_DATA = 0x1f0, ATA_SECCNT = 0x1f2, ATA_LBA0 = 0x1f3, ATA_LBA1 = 0x1f4, ATA_LBA2 = 0x1f5, ATA_DRIVE = 0x1f6, ATA_STATUS = 0x1f7 };
-enum { FS_HEADER_LBA = 32, FS_DATA_LBA = 2048, FS_FLAG_HOME = 1 };
+enum { FS_HEADER_LBA = 32, FS_BITMAP_LBA = 33, FS_DIR_LBA = 34, FS_DATA_LBA = 2048, FS_FLAG_HOME = 1 };
+enum { GRID_BLOCK_SIZE = 4096, GRID_SECTORS_PER_BLOCK = 8, GRID_CHUNKS = 16, GRID_NO_CHUNK = 0xFFFFFFFFu };
+enum { GRID_ENTRY_BYTES = 84, GRID_BITMAP_SECTORS = 1, GRID_DIR_SECTORS = 4 };
+enum { GRID_MAX_BLOCKS = GRID_BITMAP_SECTORS * 512u * 8u };
+/* 8 MiB disk minus the 1 MiB system area, in 4 KiB blocks. */
+enum { GRID_BLOCKS = 1792 };
 
 static inline void outb(unsigned short port, unsigned char value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -28,7 +53,6 @@ extern int fs_export(int index, char *name, unsigned int name_cap, unsigned char
 extern void fs_import(const char *name, const unsigned char *data, unsigned int length);
 
 static void ata_delay(void) {
-    inb(0x3f6);
     inb(0x3f6);
     inb(0x3f6);
     inb(0x3f6);
@@ -138,8 +162,110 @@ static void write_u32(unsigned char *buf, unsigned int value) {
 
 static unsigned char boot_flags;
 
-static int header_ok(const unsigned char *sector, char ver) {
-    return sector[0] == 'G' && sector[1] == 'N' && sector[2] == 'S' && sector[3] == (unsigned char)ver;
+/* Committed state; the *_next buffers stage a new one until it is fully on disk. */
+static unsigned char grid_bitmap[GRID_BITMAP_SECTORS * 512];
+static unsigned char grid_dir[GRID_DIR_SECTORS * 512];
+static unsigned char grid_bitmap_next[GRID_BITMAP_SECTORS * 512];
+static unsigned char grid_dir_next[GRID_DIR_SECTORS * 512];
+static unsigned int grid_block_count = GRID_BLOCKS;
+
+/* Keep the kernel image small for the MBR loader; use high RAM for I/O. */
+static unsigned char *const file_io = (unsigned char *)0xA00000ul;
+
+static int grid_bit_get(const unsigned char *map, unsigned int block) {
+    return (map[block >> 3] >> (block & 7u)) & 1u;
+}
+
+static void grid_bit_set(unsigned char *map, unsigned int block) {
+    map[block >> 3] |= (unsigned char)(1u << (block & 7u));
+}
+
+static void grid_bit_clear(unsigned char *map, unsigned int block) {
+    map[block >> 3] &= (unsigned char)~(1u << (block & 7u));
+}
+
+static unsigned int grid_count_free(const unsigned char *map, unsigned int blocks) {
+    unsigned int free_count = 0;
+    for (unsigned int b = 0; b < blocks; b++) {
+        if (!grid_bit_get(map, b)) {
+            free_count++;
+        }
+    }
+    return free_count;
+}
+
+static int grid_alloc_block(unsigned char *map, unsigned int blocks, unsigned int *out) {
+    for (unsigned int b = 0; b < blocks; b++) {
+        if (!grid_bit_get(map, b)) {
+            grid_bit_set(map, b);
+            *out = b;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static unsigned int chunk_lba(unsigned int block) {
+    return FS_DATA_LBA + block * GRID_SECTORS_PER_BLOCK;
+}
+
+static int grid_read_chunk(unsigned int block, unsigned char *dest) {
+    unsigned char sector[512];
+    for (unsigned int s = 0; s < GRID_SECTORS_PER_BLOCK; s++) {
+        if (!ata_read(chunk_lba(block) + s, sector)) {
+            return 0;
+        }
+        for (unsigned int i = 0; i < 512; i++) {
+            dest[s * 512u + i] = sector[i];
+        }
+    }
+    return 1;
+}
+
+static int grid_write_chunk(unsigned int block, const unsigned char *src, unsigned int length) {
+    unsigned char sector[512];
+    for (unsigned int s = 0; s < GRID_SECTORS_PER_BLOCK; s++) {
+        unsigned int offset = s * 512u;
+        for (int i = 0; i < 512; i++) {
+            sector[i] = 0;
+        }
+        unsigned int part = length > offset ? length - offset : 0;
+        if (part > 512u) {
+            part = 512u;
+        }
+        for (unsigned int i = 0; i < part; i++) {
+            sector[i] = src[offset + i];
+        }
+        if (!ata_write(chunk_lba(block) + s, sector)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int grid_name_eq(const unsigned char *entry, const char *name) {
+    for (unsigned int i = 0; i < FS_NAME; i++) {
+        if (entry[i] != (unsigned char)name[i]) {
+            return 0;
+        }
+        if (entry[i] == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void grid_write_super(unsigned char *sector, unsigned int blocks, unsigned int free_count) {
+    for (int i = 0; i < 512; i++) {
+        sector[i] = 0;
+    }
+    sector[0] = 'G';
+    sector[1] = 'B';
+    sector[2] = 'F';
+    sector[3] = '1';
+    write_u32(sector + 4, blocks);
+    sector[8] = boot_flags;
+    write_u32(sector + 12, free_count);
 }
 
 static int ata_flush(void) {
@@ -157,64 +283,62 @@ static int ata_flush(void) {
     return 0;
 }
 
-static int read_file_bytes(unsigned int lba, unsigned int length, unsigned char *dest) {
+/* Write the staged bitmap, catalog, and superblock, then adopt them. */
+static int grid_commit(unsigned int blocks) {
     unsigned char sector[512];
-    unsigned int got = 0;
-    while (got < length) {
-        if (!ata_read(lba, sector)) {
+    unsigned int free_count = grid_count_free(grid_bitmap_next, blocks);
+    for (unsigned int s = 0; s < GRID_BITMAP_SECTORS; s++) {
+        if (!ata_write(FS_BITMAP_LBA + s, grid_bitmap_next + s * 512)) {
             return 0;
         }
-        unsigned int chunk = length - got;
-        if (chunk > 512u) {
-            chunk = 512u;
-        }
-        for (unsigned int b = 0; b < chunk; b++) {
-            dest[got + b] = sector[b];
-        }
-        got += chunk;
-        lba++;
     }
+    for (unsigned int s = 0; s < GRID_DIR_SECTORS; s++) {
+        if (!ata_write(FS_DIR_LBA + s, grid_dir_next + s * 512)) {
+            return 0;
+        }
+    }
+    grid_write_super(sector, blocks, free_count);
+    if (!ata_write(FS_HEADER_LBA, sector)) {
+        return 0;
+    }
+    for (unsigned int i = 0; i < GRID_BITMAP_SECTORS * 512; i++) {
+        grid_bitmap[i] = grid_bitmap_next[i];
+    }
+    for (unsigned int i = 0; i < GRID_DIR_SECTORS * 512; i++) {
+        grid_dir[i] = grid_dir_next[i];
+    }
+    grid_block_count = blocks;
+    ata_flush();
     return 1;
 }
 
-static int write_file_bytes(unsigned int lba, const unsigned char *src, unsigned int length) {
+static int disk_load_once(void) {
     unsigned char sector[512];
-    unsigned int put = 0;
-    while (put < length || (put == 0 && length == 0)) {
-        for (int b = 0; b < 512; b++) {
-            sector[b] = 0;
-        }
-        unsigned int chunk = length - put;
-        if (chunk > 512u) {
-            chunk = 512u;
-        }
-        for (unsigned int b = 0; b < chunk; b++) {
-            sector[b] = src[put + b];
-        }
-        if (!ata_write(lba, sector)) {
+    if (!ata_read(FS_HEADER_LBA, sector)) {
+        return 0;
+    }
+    if (sector[0] != 'G' || sector[1] != 'B' || sector[2] != 'F' || sector[3] != '1') {
+        return 0;
+    }
+    unsigned int blocks = read_u32(sector + 4);
+    if (blocks == 0 || blocks > GRID_MAX_BLOCKS) {
+        return 0;
+    }
+    boot_flags = sector[8];
+    for (unsigned int s = 0; s < GRID_BITMAP_SECTORS; s++) {
+        if (!ata_read(FS_BITMAP_LBA + s, grid_bitmap + s * 512)) {
             return 0;
         }
-        put += chunk;
-        lba++;
-        if (length == 0) {
-            break;
+    }
+    for (unsigned int s = 0; s < GRID_DIR_SECTORS; s++) {
+        if (!ata_read(FS_DIR_LBA + s, grid_dir + s * 512)) {
+            return 0;
         }
     }
-    return 1;
-}
-
-/* Keep the kernel image small for the MBR loader; use high RAM for I/O. */
-static unsigned char *const file_io = (unsigned char *)0xA00000ul;
-
-static int disk_load_gns2(const unsigned char *header) {
-    boot_flags = header[8];
-    unsigned int count = read_u32(header + 4);
-    if (count > FS_MAX) {
-        count = FS_MAX;
-    }
+    grid_block_count = blocks;
     fs_clear_all();
-    for (unsigned int i = 0; i < count; i++) {
-        const unsigned char *entry = header + 16 + i * 24;
+    for (unsigned int i = 0; i < FS_MAX; i++) {
+        const unsigned char *entry = grid_dir + i * GRID_ENTRY_BYTES;
         char name[FS_NAME];
         unsigned int n = 0;
         while (n + 1 < FS_NAME && entry[n] != 0) {
@@ -222,65 +346,33 @@ static int disk_load_gns2(const unsigned char *header) {
             n++;
         }
         name[n] = 0;
-        unsigned int lba = read_u32(entry + 16);
-        unsigned int length = read_u32(entry + 20);
+        unsigned int length = read_u32(entry + 16);
         if (name[0] == 0 || length > FS_DATA) {
             continue;
         }
-        if (length > 0 && !read_file_bytes(lba, length, file_io)) {
-            return 0;
+        unsigned int chunks = (length + GRID_BLOCK_SIZE - 1u) / GRID_BLOCK_SIZE;
+        int ok = 1;
+        for (unsigned int k = 0; k < chunks; k++) {
+            if (read_u32(entry + 20 + k * 4) >= blocks) {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+        for (unsigned int k = 0; k < chunks; k++) {
+            unsigned int block = read_u32(entry + 20 + k * 4);
+            if (!grid_read_chunk(block, file_io + k * GRID_BLOCK_SIZE)) {
+                return 0;
+            }
         }
         fs_import(name, file_io, length);
     }
     return 1;
 }
 
-static int disk_load_gns1(const unsigned char *header, int from_header) {
-    boot_flags = from_header ? header[8] : 0;
-    unsigned int count = read_u32(header + 4);
-    if (count > FS_MAX) {
-        count = FS_MAX;
-    }
-    fs_clear_all();
-    unsigned char sector[512];
-    for (unsigned int i = 0; i < count; i++) {
-        if (!ata_read(1 + i, sector)) {
-            return 0;
-        }
-        char name[FS_NAME];
-        unsigned int n = 0;
-        while (n + 1 < FS_NAME && sector[n] != 0) {
-            name[n] = (char)sector[n];
-            n++;
-        }
-        name[n] = 0;
-        unsigned int length = read_u32(sector + 16);
-        if (length > 128u) {
-            length = 128u;
-        }
-        if (name[0] == 0) {
-            continue;
-        }
-        fs_import(name, sector + 20, length);
-    }
-    return 1;
-}
-
-static int disk_load_once(void) {
-    unsigned char sector[512];
-    if (ata_read(FS_HEADER_LBA, sector) && header_ok(sector, '2')) {
-        return disk_load_gns2(sector);
-    }
-    if (ata_read(FS_HEADER_LBA, sector) && header_ok(sector, '1')) {
-        return disk_load_gns1(sector, 1);
-    }
-    if (ata_read(0, sector) && header_ok(sector, '1')) {
-        return disk_load_gns1(sector, 0);
-    }
-    return 0;
-}
-
-int disk_load(void) {
+static int disk_load_retry(void) {
     for (int attempt = 0; attempt < 4; attempt++) {
         if (disk_load_once()) {
             return 1;
@@ -289,45 +381,55 @@ int disk_load(void) {
     return 0;
 }
 
+int disk_load(void) {
+    return disk_load_retry();
+}
+
 static int disk_save_once(void) {
-    unsigned char header[512];
-    for (int b = 0; b < 512; b++) {
-        header[b] = 0;
+    unsigned int blocks = grid_block_count;
+    if (blocks == 0 || blocks > GRID_MAX_BLOCKS) {
+        blocks = GRID_BLOCKS;
     }
-    header[0] = 'G';
-    header[1] = 'N';
-    header[2] = 'S';
-    header[3] = '2';
-    header[8] = boot_flags;
-    unsigned int count = 0;
-    unsigned int lba = FS_DATA_LBA;
-    for (int i = 0; i < FS_MAX; i++) {
+    for (unsigned int i = 0; i < GRID_BITMAP_SECTORS * 512; i++) {
+        grid_bitmap_next[i] = 0;
+    }
+    for (unsigned int i = 0; i < GRID_DIR_SECTORS * 512; i++) {
+        grid_dir_next[i] = 0;
+    }
+    for (unsigned int i = 0; i < FS_MAX; i++) {
         char name[FS_NAME];
         unsigned int length = 0;
         if (!fs_export(i, name, FS_NAME, file_io, &length)) {
             continue;
         }
-        unsigned char *entry = header + 16 + count * 24;
+        unsigned int chunks = (length + GRID_BLOCK_SIZE - 1u) / GRID_BLOCK_SIZE;
+        unsigned char *entry = grid_dir_next + i * GRID_ENTRY_BYTES;
         unsigned int n = 0;
         while (name[n] != 0 && n + 1 < FS_NAME) {
             entry[n] = (unsigned char)name[n];
             n++;
         }
-        write_u32(entry + 16, lba);
-        write_u32(entry + 20, length);
-        if (!write_file_bytes(lba, file_io, length)) {
-            return 0;
+        entry[n] = 0;
+        write_u32(entry + 16, length);
+        for (unsigned int k = 0; k < GRID_CHUNKS; k++) {
+            write_u32(entry + 20 + k * 4, GRID_NO_CHUNK);
         }
-        unsigned int sectors = length == 0 ? 1u : (length + 511u) / 512u;
-        lba += sectors;
-        count++;
+        for (unsigned int k = 0; k < chunks; k++) {
+            unsigned int block = 0;
+            if (!grid_alloc_block(grid_bitmap_next, blocks, &block)) {
+                return 0;
+            }
+            write_u32(entry + 20 + k * 4, block);
+            unsigned int bytes = length - k * GRID_BLOCK_SIZE;
+            if (bytes > GRID_BLOCK_SIZE) {
+                bytes = GRID_BLOCK_SIZE;
+            }
+            if (!grid_write_chunk(block, file_io + k * GRID_BLOCK_SIZE, bytes)) {
+                return 0;
+            }
+        }
     }
-    write_u32(header + 4, count);
-    if (!ata_write(FS_HEADER_LBA, header)) {
-        return 0;
-    }
-    ata_flush();
-    return 1;
+    return grid_commit(blocks);
 }
 
 int disk_save(void);
@@ -354,6 +456,35 @@ int disk_save(void) {
     return 0;
 }
 
+int grid_unlink(const char *name) {
+    if (grid_block_count == 0 || name[0] == 0) {
+        return 0;
+    }
+    for (unsigned int s = 0; s < GRID_BITMAP_SECTORS * 512; s++) {
+        grid_bitmap_next[s] = grid_bitmap[s];
+    }
+    for (unsigned int i = 0; i < GRID_DIR_SECTORS * 512; i++) {
+        grid_dir_next[i] = grid_dir[i];
+    }
+    for (unsigned int i = 0; i < FS_MAX; i++) {
+        unsigned char *entry = grid_dir_next + i * GRID_ENTRY_BYTES;
+        if (!grid_name_eq(entry, name)) {
+            continue;
+        }
+        for (unsigned int k = 0; k < GRID_CHUNKS; k++) {
+            unsigned int block = read_u32(entry + 20 + k * 4);
+            if (block < grid_block_count) {
+                grid_bit_clear(grid_bitmap_next, block);
+            }
+        }
+        for (unsigned int b = 0; b < GRID_ENTRY_BYTES; b++) {
+            entry[b] = 0;
+        }
+        return grid_commit(grid_block_count);
+    }
+    return 0;
+}
+
 extern const unsigned char mbr_bin[];
 extern const unsigned char mbr_bin_end[];
 extern char kernel_load_start[];
@@ -370,6 +501,10 @@ int install_system(void) {
     }
     unsigned int sectors = (bytes + 511u) / 512u;
     const unsigned int lba = 64;
+    if (lba + sectors > FS_DATA_LBA) {
+        console_puts("install: too big\n");
+        return 0;
+    }
     unsigned char sector[512];
     const unsigned char *src = (const unsigned char *)kernel_load_start;
     for (unsigned int i = 0; i < sectors; i++) {

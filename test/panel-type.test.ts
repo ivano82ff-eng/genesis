@@ -8,13 +8,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
+import { delay, typeLine } from "./helpers.js";
 
 function lightCount(ppm: Buffer, x: number, y: number, w: number, h: number): number {
   const image = parsePpm(ppm);

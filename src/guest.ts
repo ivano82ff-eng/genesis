@@ -1,9 +1,11 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export type DisplayMode = "none" | "gtk";
 
@@ -116,13 +118,15 @@ class QmpClient {
     return msg.return;
   }
 
-  static async connect(sockPath: string): Promise<QmpClient> {
-    const deadline = Date.now() + 5000;
+  static async connect(target: string | { host: string; port: number }): Promise<QmpClient> {
+    const deadline = Date.now() + (typeof target === "string" ? 5000 : 15000);
     let lastError: unknown;
     while (Date.now() < deadline) {
       try {
         const socket = await new Promise<net.Socket>((resolve, reject) => {
-          const client = net.createConnection(sockPath);
+          const client = typeof target === "string"
+              ? net.createConnection(target)
+              : net.createConnection(target.port, target.host);
           const onError = (err: Error): void => {
             client.removeListener("connect", onConnect);
             reject(err);
@@ -152,6 +156,46 @@ class QmpClient {
   }
 }
 
+/** QEMU for Windows, reachable from WSL 1 through interop. */
+export const WINDOWS_QEMU = "/mnt/c/Program Files/qemu/qemu-system-x86_64.exe";
+
+/**
+ * Pick the QEMU binary. GENESIS_QEMU overrides everything. A window (gtk) without
+ * DISPLAY/WAYLAND_DISPLAY (WSL 1, no WSLg) falls back to QEMU for Windows.
+ * Headless runs keep the Linux qemu-system-x86_64.
+ */
+export function pickQemu(display: DisplayMode): string {
+  const forced = process.env.GENESIS_QEMU;
+  if (forced) {
+    return forced;
+  }
+  if (
+    display === "gtk" &&
+    !process.env.DISPLAY &&
+    !process.env.WAYLAND_DISPLAY &&
+    existsSync(WINDOWS_QEMU)
+  ) {
+    return WINDOWS_QEMU;
+  }
+  return "qemu-system-x86_64";
+}
+
+function toWindowsPath(p: string): string {
+  return execFileSync("wslpath", ["-w", path.resolve(p)], { encoding: "utf8" }).trim();
+}
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 async function ensureDisk(diskPath: string): Promise<void> {
   try {
     await stat(diskPath);
@@ -168,7 +212,10 @@ export async function startGuest(options: {
   boot?: "cd" | "disk";
   net?: { mode: "listen" | "connect"; port: number; mac: string };
 }): Promise<Guest> {
-  const qemu = options.qemuBin ?? "qemu-system-x86_64";
+  const qemu = options.qemuBin ?? pickQemu(options.display);
+  const windowsQemu = qemu.toLowerCase().endsWith(".exe");
+  const hostPath = (p: string): string => (windowsQemu ? toWindowsPath(p) : p);
+  const qmpPort = windowsQemu ? await freePort() : 0;
   const sockPath = path.join(
     os.tmpdir(),
     `genesis-qmp-${process.pid}-${Date.now()}.sock`,
@@ -181,6 +228,10 @@ export async function startGuest(options: {
     options.diskPath ??
     path.join(os.tmpdir(), `genesis-disk-${process.pid}-${Date.now()}.img`);
   await ensureDisk(diskPath);
+  // Windows QEMU cannot write into the WSL /tmp reliably; keep the dump next to the disk.
+  const screenPath = windowsQemu
+    ? path.join(path.dirname(path.resolve(diskPath)), path.basename(dumpPath))
+    : dumpPath;
   const args = [
     "-machine",
     "pc",
@@ -189,7 +240,7 @@ export async function startGuest(options: {
     "-m",
     "128M",
     "-drive",
-    `file=${diskPath},format=raw,if=ide,index=0,media=disk,cache=writethrough`,
+    `file=${hostPath(diskPath)},format=raw,if=ide,index=0,media=disk,cache=writethrough`,
     "-serial",
     "stdio",
     "-display",
@@ -197,7 +248,9 @@ export async function startGuest(options: {
     "-vga",
     "std",
     "-qmp",
-    `unix:${sockPath},server,nowait`,
+    windowsQemu
+      ? `tcp:127.0.0.1:${qmpPort},server,nowait`
+      : `unix:${sockPath},server,nowait`,
     "-monitor",
     "none",
   ];
@@ -207,7 +260,7 @@ export async function startGuest(options: {
     if (!options.isoPath) {
       throw new Error("Для загрузки с CD нужен ISO");
     }
-    args.push("-cdrom", options.isoPath, "-boot", "order=d");
+    args.push("-cdrom", hostPath(options.isoPath), "-boot", "order=d");
   }
   if (options.net) {
     const endpoint =
@@ -234,8 +287,10 @@ export async function startGuest(options: {
   let exitCode: number | null = null;
   let stopped = false;
 
+  // Serial bytes arrive in arbitrary chunks; keep multibyte UTF-8 (Cyrillic labels) intact.
+  const serialDecoder = new StringDecoder("utf8");
   child.stdout?.on("data", (buf: Buffer) => {
-    const text = buf.toString("utf8");
+    const text = serialDecoder.write(buf);
     process.stdout.write(text);
     serial += text;
     events.emit("serial");
@@ -272,7 +327,9 @@ export async function startGuest(options: {
     events.once("spawn-error", reject);
   });
 
-  const qmpPromise = QmpClient.connect(sockPath);
+  const qmpPromise = QmpClient.connect(
+    windowsQemu ? { host: "127.0.0.1", port: qmpPort } : sockPath,
+  );
   void qmpPromise.catch(() => undefined);
 
   const kill = (): void => {
@@ -350,8 +407,8 @@ export async function startGuest(options: {
     },
     async screendump(): Promise<Buffer> {
       const client = await qmpPromise;
-      await client.execute("screendump", { filename: dumpPath });
-      return readFile(dumpPath);
+      await client.execute("screendump", { filename: hostPath(screenPath) });
+      return readFile(screenPath);
     },
     async sendKey(qcode: string): Promise<void> {
       const client = await qmpPromise;
@@ -379,8 +436,12 @@ export async function startGuest(options: {
       stopped = true;
       if (exitCode != null || child.signalCode != null) {
         await unlink(sockPath).catch(() => undefined);
-        await unlink(dumpPath).catch(() => undefined);
+        await unlink(screenPath).catch(() => undefined);
         return;
+      }
+      if (windowsQemu) {
+        // Killing the interop bridge may leave the Windows process alive; ask QEMU to quit.
+        await qmpPromise.then((c) => c.execute("quit")).catch(() => undefined);
       }
       await new Promise<void>((resolve) => {
         const giveUp = setTimeout(resolve, 2000);
@@ -391,7 +452,7 @@ export async function startGuest(options: {
         kill();
       });
       await unlink(sockPath).catch(() => undefined);
-      await unlink(dumpPath).catch(() => undefined);
+      await unlink(screenPath).catch(() => undefined);
     },
   };
 

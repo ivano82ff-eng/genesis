@@ -378,9 +378,21 @@ static int row_hit(int y) {
 }
 
 static int is_hidden_name(const char *name) {
-    return name[0] == 'v' || (name[0] == 'o' && name[1] == 'p') ||
-           (name[0] == 'h' && name[1] == 'e' && name[2] == 'l' && name[3] == 'l' &&
-            name[4] == 'o' && name[5] == 0);
+    static const char *const hidden[] = {
+        "open", "hello", "vtxt", "vdocx", "vpdf", "vimg", "vmp4",
+    };
+    for (unsigned int i = 0; i < sizeof hidden / sizeof hidden[0]; i++) {
+        const char *a = name;
+        const char *b = hidden[i];
+        while (*a != 0 && *a == *b) {
+            a++;
+            b++;
+        }
+        if (*a == 0 && *b == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void collect_files(void) {
@@ -481,10 +493,23 @@ static int api_poll_back(void) { return viewer_back; }
 static void api_yield(void) {
     guest_yield();
 }
+/* Bump arena shared by all viewer allocations; reset on every launch. */
+static unsigned char viewer_arena[65536];
+static unsigned int viewer_arena_used;
+
 static void *api_malloc(unsigned int size) {
-    (void)size;
-    return 0;
+    if (size == 0) {
+        size = 1;
+    }
+    unsigned int start = (viewer_arena_used + 15u) & ~15u;
+    if (start > sizeof viewer_arena || size > sizeof viewer_arena - start) {
+        return 0;
+    }
+    viewer_arena_used = start + size;
+    return viewer_arena + start;
 }
+
+/* No per-block free: the arena resets when the next viewer launches. */
 static void api_free(void *ptr) { (void)ptr; }
 
 static const char *viewer_for_name(const char *name) {
@@ -541,11 +566,12 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
     for (unsigned int i = 0; i < prog_len; i++) {
         dest[i] = prog[i];
     }
-    for (unsigned int i = 0; i < 65536u; i++) {
+    for (unsigned int i = 0; i < GENESIS_PROG_HEAP; i++) {
         dest[prog_len + i] = 0;
     }
     view = VIEW_VIEWER;
     viewer_back = 0;
+    viewer_arena_used = 0;
     mouse_arm();
     cursor_forget();
     fill(0, 0, FB_W, FB_H, BG);
