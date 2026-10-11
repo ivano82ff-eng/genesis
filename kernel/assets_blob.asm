@@ -84,3 +84,9 @@ global sample_clip_mp4_end
 sample_clip_mp4:
 incbin "samples/clip.mp4"
 sample_clip_mp4_end:
+
+global pkg_repo
+global pkg_repo_end
+pkg_repo:
+incbin "build/pkgrepo.bin"
+pkg_repo_end:

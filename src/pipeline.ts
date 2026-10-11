@@ -1,3 +1,4 @@
+import { buildPackages } from "./packages.js";
 import { spawn, spawnSync } from "node:child_process";
 import { startGuest } from "./guest.js";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -120,6 +121,7 @@ export async function buildImage(): Promise<ImagePaths> {
   const linkObj = path.join(buildDir, "link.o");
   const taskObj = path.join(buildDir, "task.o");
   const editorObj = path.join(buildDir, "editor.o");
+  const pkgObj = path.join(buildDir, "pkg.o");
   const mbrBin = path.join(buildDir, "mbr.bin");
   const mbrObj = path.join(buildDir, "mbr_blob.o");
   const runtimeObj = path.join(buildDir, "runtime.o");
@@ -198,6 +200,8 @@ export async function buildImage(): Promise<ImagePaths> {
     await exec("objcopy", ["-O", "binary", elf, bin], root);
   }
 
+  await buildPackages(root, buildDir, exec);
+
   await exec("nasm", ["-fbin", path.join(root, "kernel", "mbr.asm"), "-o", mbrBin], root);
 
   await exec(
@@ -236,6 +240,8 @@ export async function buildImage(): Promise<ImagePaths> {
 
   await compileKernel("editor.c", editorObj);
 
+  await compileKernel("pkg.c", pkgObj);
+
   await exec("ld", [
     "-m",
     "elf_x86_64",
@@ -258,6 +264,7 @@ export async function buildImage(): Promise<ImagePaths> {
     linkObj,
     taskObj,
     editorObj,
+    pkgObj,
     mbrObj,
     blobObj,
   ], root);
