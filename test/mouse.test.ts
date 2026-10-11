@@ -55,14 +55,20 @@ test(
       await guest.waitForSerial("usable ", DEFAULT_TIMEOUT_MS);
       assert.match(guest.serial, /Назад/);
 
-      const after = parsePpm(await guest.screendump());
       /* show_memory arms the pointer at 0,0 so the next click can hit «Назад». */
+      /* The guest idles with hlt between ticks, so the redraw can land just after the serial line. */
       let cursor = false;
-      for (let y = 0; y < 40 && !cursor; y++) {
-        for (let x = 0; x < 40; x++) {
-          if (isCursor(pixel(after, x, y))) {
-            cursor = true;
-            break;
+      for (let attempt = 0; attempt < 20 && !cursor; attempt++) {
+        if (attempt > 0) {
+          await delay(250);
+        }
+        const after = parsePpm(await guest.screendump());
+        for (let y = 0; y < 40 && !cursor; y++) {
+          for (let x = 0; x < 40; x++) {
+            if (isCursor(pixel(after, x, y))) {
+              cursor = true;
+              break;
+            }
           }
         }
       }

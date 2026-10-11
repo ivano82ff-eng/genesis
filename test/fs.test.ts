@@ -38,7 +38,7 @@ test(
       await guest.waitForSerial("cat: hi", DEFAULT_TIMEOUT_MS);
 
       await typeLine(guest, "ls");
-      await guest.waitForSerial("clip.mp4 note", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("clip.mp4 ticker note", DEFAULT_TIMEOUT_MS);
     } finally {
       await guest.stop();
     }

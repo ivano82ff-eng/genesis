@@ -12,7 +12,7 @@ import { screenTextError } from "../src/vga-text.js";
 import { delay } from "./helpers.js";
 
 const PROMPT = "genesis> ";
-const HELP_REPLY = "commands: help echo clear mem alloc heap ls cat write rm run desktop";
+const HELP_REPLY = "commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop";
 
 test(
   "help replies on serial and on the VGA screen",

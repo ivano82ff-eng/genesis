@@ -7,6 +7,12 @@ hello_bin:
 incbin "build/hello.bin"
 hello_bin_end:
 
+global ticker_bin
+global ticker_bin_end
+ticker_bin:
+incbin "build/ticker.bin"
+ticker_bin_end:
+
 global open_bin
 global open_bin_end
 open_bin:

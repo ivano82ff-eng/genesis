@@ -78,14 +78,13 @@ test(
     const image = await buildImage();
 
     const fill = async (guest: Awaited<ReturnType<typeof startGuest>>): Promise<void> => {
-      // Seeding takes 14 of 20 catalog slots, so six writes fill the rest.
+      // Seeding takes 15 of 20 catalog slots, so five writes fill the rest.
       for (const [name, text] of [
         ["f1", "a1"],
         ["f2", "a2"],
         ["f3", "a3"],
         ["f4", "a4"],
         ["f5", "a5"],
-        ["f6", "a6"],
       ] as const) {
         await typeLine(guest, `write ${name} ${text}`);
         await guest.waitForSerial(`write: ${name}`, DEFAULT_TIMEOUT_MS);

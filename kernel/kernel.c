@@ -34,6 +34,11 @@ void clock_service(void);
 int link_up(void);
 int link_send_text(const char *text);
 int link_ping(void);
+void timer_start(void);
+int task_current(void);
+int task_spawn(const char *name, void *code);
+void task_sleep(unsigned int ticks);
+void cmd_ps(void);
 
 static volatile unsigned short *const VGA = (volatile unsigned short *)0xb8000;
 
@@ -315,6 +320,9 @@ static void keyboard_poll(void) {
 }
 
 void guest_yield(void) {
+    if (task_current() != 0) {
+        return; /* input belongs to the shell task */
+    }
     keyboard_poll();
     clock_service();
     link_poll();
@@ -380,9 +388,13 @@ void console_putc(char ch) {
 }
 
 void console_puts(const char *text) {
+    /* One string at a time, so a background task cannot split a line. */
+    unsigned long flags;
+    ps2_lock(&flags);
     while (*text) {
         console_putc(*text++);
     }
+    ps2_unlock(flags);
 }
 
 enum { LINE_MAX = 72 };
@@ -633,6 +645,8 @@ static struct ram_file *fs_find(const char *name) {
 
 extern const unsigned char hello_bin[];
 extern const unsigned char hello_bin_end[];
+extern const unsigned char ticker_bin[];
+extern const unsigned char ticker_bin_end[];
 extern const unsigned char open_bin[];
 extern const unsigned char open_bin_end[];
 extern const unsigned char vtxt_bin[];
@@ -677,6 +691,7 @@ static void fs_seed(void) {
     fs_seed_blob("pic.jpg", sample_pic_jpg, sample_pic_jpg_end);
     fs_seed_blob("note.pdf", sample_note_pdf, sample_note_pdf_end);
     fs_seed_blob("clip.mp4", sample_clip_mp4, sample_clip_mp4_end);
+    fs_seed_blob("ticker", ticker_bin, ticker_bin_end);
 }
 
 void fs_clear_all(void) {
@@ -901,9 +916,11 @@ static void cmd_rm(const char *name) {
 }
 
 typedef void (*print_fn)(const char *);
-typedef void (*prog_fn)(print_fn print);
+typedef void (*sleep_fn)(unsigned int ticks);
+typedef void (*prog_fn)(print_fn print, sleep_fn sleep);
 
-static void cmd_run(const char *name) {
+/* background: start the program as a task (`spawn NAME`) and return. */
+static void cmd_run(const char *name, int background) {
     struct ram_file *file = fs_find(name);
     if (file == 0) {
         console_puts("run: no such file\n");
@@ -917,13 +934,24 @@ static void cmd_run(const char *name) {
     for (unsigned int i = 0; i < file->length; i++) {
         dest[i] = (unsigned char)file->data[i];
     }
+    if (background) {
+        int id = task_spawn(name, dest);
+        if (id < 0) {
+            console_puts("spawn: too many tasks\n");
+            return;
+        }
+        console_puts("spawn: task ");
+        print_u32((unsigned int)id);
+        console_putc('\n');
+        return;
+    }
     program_len = 0;
     program_text[0] = 0;
     program_capture = 1;
     /* Programs are machine code run in ring 0: no isolation, a bad program
      * can hang the whole kernel. Fine for a demo, not a userspace. */
     prog_fn program = (prog_fn)(void *)dest;
-    program(console_puts);
+    program(console_puts, task_sleep);
     program_capture = 0;
     console_putc('\n');
 }
@@ -933,7 +961,7 @@ const char *program_output(void) {
 }
 
 void run_program(const char *name) {
-    cmd_run(name);
+    cmd_run(name, 0);
 }
 
 void memory_summary(char *dest, unsigned int cap) {
@@ -997,7 +1025,7 @@ static void execute(char *input) {
         return;
     }
     if (str_eq(input, "help")) {
-        console_puts("commands: help echo clear mem alloc heap ls cat write rm run desktop\n");
+        console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -1044,7 +1072,15 @@ static void execute(char *input) {
         return;
     }
     if (str_eq(input, "run") || starts_with(input, "run ")) {
-        cmd_run(input[3] == ' ' ? input + 4 : "");
+        cmd_run(input[3] == ' ' ? input + 4 : "", 0);
+        return;
+    }
+    if (str_eq(input, "spawn") || starts_with(input, "spawn ")) {
+        cmd_run(input[5] == ' ' ? input + 6 : "", 1);
+        return;
+    }
+    if (str_eq(input, "ps")) {
+        cmd_ps();
         return;
     }
     if (str_eq(input, "desktop")) {
@@ -1161,10 +1197,14 @@ __attribute__((noreturn)) void kmain(unsigned int mb_info) {
     serial_puts("genesis: kernel booted\n");
     link_init();
     keyboard_drain();
+    timer_start();
     prompt();
     for (;;) {
         keyboard_poll();
         clock_service();
         link_poll();
+        /* Idle until the next timer tick: input is drained on every tick,
+         * and other tasks get the rest of this slice. */
+        __asm__ volatile("hlt");
     }
 }
