@@ -1,0 +1,1 @@
+{ "name": "strlib", "version": "1.0", "deps": ["mathlib"], "description": "string helpers: len upper reverse utoa" }

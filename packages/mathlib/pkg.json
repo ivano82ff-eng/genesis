@@ -1,0 +1,1 @@
+{ "name": "mathlib", "version": "1.0", "deps": [], "description": "integer math: pow gcd isqrt udivmod" }
