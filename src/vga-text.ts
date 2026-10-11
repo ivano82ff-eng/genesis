@@ -1,4 +1,6 @@
 /** Glyphs from QEMU's std VGA text mode, 8×16 inside a 9×16 cell, 720×400. */
+import { parsePpm, type RgbImage } from "./ppm.js";
+
 const CELL_W = 9;
 const CELL_H = 16;
 const SCREEN_W = 80 * CELL_W;
@@ -28,53 +30,7 @@ const GLYPHS: Record<string, readonly number[]> = {
   w: [0x00, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xc3, 0xc3, 0xdb, 0xdb, 0xff, 0x66, 0x00, 0x00, 0x00, 0x00],
 };
 
-type Image = {
-  width: number;
-  height: number;
-  pixels: Buffer;
-};
-
-function parseP6(ppm: Buffer): Image {
-  if (ppm.length < 3 || ppm[0] !== 0x50 || ppm[1] !== 0x36) {
-    throw new Error("Снимок экрана не PPM P6");
-  }
-  let offset = 2;
-  const tokens: string[] = [];
-  while (tokens.length < 3) {
-    while (offset < ppm.length && ppm[offset] !== undefined && ppm[offset]! <= 0x20) {
-      offset++;
-    }
-    if (offset >= ppm.length) {
-      throw new Error("Обрезанный заголовок PPM");
-    }
-    if (ppm[offset] === 0x23) {
-      while (offset < ppm.length && ppm[offset] !== 0x0a) {
-        offset++;
-      }
-      continue;
-    }
-    const start = offset;
-    while (offset < ppm.length && ppm[offset]! > 0x20) {
-      offset++;
-    }
-    tokens.push(ppm.subarray(start, offset).toString("ascii"));
-  }
-  if (offset < ppm.length && ppm[offset]! <= 0x20) {
-    offset++;
-  }
-  const width = Number(tokens[0]);
-  const height = Number(tokens[1]);
-  const maxval = Number(tokens[2]);
-  if (!Number.isInteger(width) || !Number.isInteger(height) || maxval !== 255) {
-    throw new Error(`Неожиданный PPM ${tokens.join(" ")}`);
-  }
-  const need = width * height * 3;
-  const pixels = ppm.subarray(offset, offset + need);
-  if (pixels.length !== need) {
-    throw new Error("В PPM не хватает пикселей");
-  }
-  return { width, height, pixels };
-}
+type Image = RgbImage;
 
 function glyphAt(image: Image, col: number, row = 0): number[] {
   const rows: number[] = [];
@@ -103,7 +59,7 @@ function sameGlyph(actual: readonly number[], expected: readonly number[]): bool
 
 /** null when VGA text row `row` shows `text`. */
 export function screenTextError(ppm: Buffer, text: string, row = 0): string | null {
-  const image = parseP6(ppm);
+  const image = parsePpm(ppm);
   if (image.width !== SCREEN_W || image.height !== SCREEN_H) {
     return `ожидался кадр VGA ${SCREEN_W}x${SCREEN_H}, получен ${image.width}x${image.height}`;
   }
@@ -133,7 +89,7 @@ export function screenShowsChar(ppm: Buffer, ch: string): boolean {
   if (expected == null) {
     return false;
   }
-  const image = parseP6(ppm);
+  const image = parsePpm(ppm);
   if (image.width !== SCREEN_W || image.height !== SCREEN_H) {
     return false;
   }

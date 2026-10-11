@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { startGuest, type Guest } from "./guest.js";
+import { startGuest } from "./guest.js";
 import { ppmToPng } from "./png.js";
+import { delay, typeLine } from "./typing.js";
 import {
   BOOT_MARKER,
   DEFAULT_TIMEOUT_MS,
@@ -73,21 +74,6 @@ async function boot(timeoutMs: number): Promise<void> {
     return;
   }
   console.error("Маркер найден");
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-async function typeLine(guest: Guest, text: string): Promise<void> {
-  for (const ch of text) {
-    await guest.sendKey(ch === " " ? "spc" : ch);
-    await delay(35);
-  }
-  await guest.sendKey("ret");
-  await delay(40);
 }
 
 async function show(timeoutMs: number): Promise<void> {

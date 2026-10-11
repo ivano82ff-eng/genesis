@@ -9,7 +9,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
+import { typeLine } from "./helpers.js";
 
 function lightPixels(image: ReturnType<typeof parsePpm>, x: number, y: number, w: number, h: number): number {
   let count = 0;

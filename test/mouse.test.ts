@@ -9,18 +9,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function pixel(image: ReturnType<typeof parsePpm>, x: number, y: number): [number, number, number] {
-  const index = (y * image.width + x) * 3;
-  return [image.pixels[index]!, image.pixels[index + 1]!, image.pixels[index + 2]!];
-}
+import { delay, pixel, typeLine } from "./helpers.js";
 
 function isYellow([r, g, b]: [number, number, number]): boolean {
   return r > 180 && g > 140 && b < 120;

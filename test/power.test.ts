@@ -8,27 +8,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { typeLine } from "./type-line.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function countOf(text: string, needle: string): number {
-  let count = 0;
-  let from = 0;
-  while (from < text.length) {
-    const at = text.indexOf(needle, from);
-    if (at < 0) {
-      return count;
-    }
-    count += 1;
-    from = at + needle.length;
-  }
-  return count;
-}
+import { countOf, delay, typeLine } from "./helpers.js";
 
 test(
   "poweroff makes QEMU exit",

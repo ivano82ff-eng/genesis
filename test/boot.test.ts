@@ -11,12 +11,7 @@ import {
   saveSerialLog,
 } from "../src/pipeline.js";
 import { screenShowsChar, screenTextError } from "../src/vga-text.js";
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
+import { delay } from "./helpers.js";
 
 test(
   "COM1 prints the genesis boot marker",
