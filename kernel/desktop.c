@@ -362,8 +362,8 @@ static void layout_init(void) {
     CLOSE_H = TITLE_H - P(12);
     layout_cells();
 }
-enum { P_NONE = 0, P_FILES, P_TERM, P_PKG, P_MEM, P_FEED, P_SET, P_TASKS };
-enum { K_FILES = 0, K_EDITOR, K_TERM, K_PKG, K_MEM, K_FEED, K_SET, K_APP, K_PIN };
+enum { P_NONE = 0, P_FILES, P_TERM, P_PKG, P_MEM, P_FEED, P_SET, P_TASKS, P_WEB };
+enum { K_FILES = 0, K_EDITOR, K_TERM, K_PKG, K_MEM, K_FEED, K_SET, K_APP, K_PIN, K_WEB };
 static void open_feed(int filter);
 static int s_starts(const char *s, const char *prefix);
 enum { DESK_UP = 1, DESK_DOWN = 2, DESK_LEFT = 3, DESK_RIGHT = 4, DESK_PGUP = 5, DESK_PGDN = 6, DESK_ESC = 27 };
@@ -390,10 +390,16 @@ int journal_count(void);
 int link_peer(char *out);
 void link_hello(void);
 int journal_get(int i, char *time, char *type, char *text, unsigned int cap);
+#include "browser.h"
+void web_start(const char *url);
+extern int fs_put(const char *name, const char *data, unsigned int length);
+extern int fs_get(const char *name, const unsigned char **data, unsigned int *length);
+extern void shell_pin(const char *path, int add);
+unsigned int clock_ticks_total(void);
 
 
 
-static const unsigned char ICONS[9][8] = {
+static const unsigned char ICONS[10][8] = {
     {0x00, 0x70, 0x88, 0xff, 0x81, 0x81, 0x81, 0xff}, /* files: folder */
     {0xfc, 0x86, 0x85, 0xbf, 0x81, 0xbd, 0x81, 0xff}, /* editor: page */
     {0xff, 0x81, 0xa1, 0x91, 0xa1, 0x8d, 0x81, 0xff}, /* terminal: >_ */
@@ -403,6 +409,7 @@ static const unsigned char ICONS[9][8] = {
     {0x18, 0x5a, 0x3c, 0xe7, 0xe7, 0x3c, 0x5a, 0x18}, /* settings: gear */
     {0x18, 0x3c, 0x7e, 0xff, 0xff, 0x7e, 0x3c, 0x18}, /* program */
     {0x00, 0x70, 0xff, 0x81, 0x99, 0x99, 0x81, 0xff}, /* pinned folder */
+    {0x3c, 0x5a, 0x99, 0xff, 0x99, 0x5a, 0x3c, 0x00}, /* browser: globe */
 };
 static const char *const fixed_labels[7] = {"Файлы", "Редактор", "Терминал", "Пакеты", "Память", "Лента", "Настройки"};
 
@@ -410,12 +417,15 @@ struct cell {
     int kind;
     char label[32];
     char arg[FS_NAME];
+    char key[FS_NAME + 8]; /* layout name: files, web, app:NAME, pin:/PATH */
 };
 static struct cell cells[CELL_MAX];
 static int cell_count;
 static char cells_line[512];
 
 static int panel;
+static int edit_mode;        /* cells layout edit mode */
+static int edit_picked = -1; /* cell carried by the keyboard in edit mode */
 static int focus = -1;     /* keyboard focus: cell index, CELL_CORE or -1 */
 static int hint = -1;      /* cell matching what is typed in the bar */
 static int core_mem;
@@ -620,11 +630,7 @@ static int in_rect(int x, int y, int rx, int ry, int rw, int rh) {
 }
 
 /* ---- cells ---- */
-static void cell_add(int kind, const char *label, const char *arg) {
-    if (cell_count >= CELL_MAX) {
-        return;
-    }
-    struct cell *c = &cells[cell_count++];
+static void cell_put(struct cell *c, int kind, const char *label, const char *arg, const char *key) {
     c->kind = kind;
     /* At most 9 characters fit inside a cell. */
     unsigned int n = 0;
@@ -638,21 +644,44 @@ static void cell_add(int kind, const char *label, const char *arg) {
     }
     c->label[n] = 0;
     s_copy(c->arg, arg, sizeof c->arg);
+    s_copy(c->key, key, sizeof c->key);
 }
 
-/* Fixed cells, then installed programs, then pinned folders. Prints
- * "cells: ..." on the serial line whenever the set changes. */
-static int rebuild_cells(void) {
-    cell_count = 0;
-    for (int i = 0; i < 7; i++) {
-        cell_add(i, fixed_labels[i], "");
+/* ---- layout: which cells, in what order (/home/.layout) ----
+ * The file holds one key per line in display order; "-key" hides a cell.
+ * Cells the file does not name follow in their default order. */
+#define LAYOUT_FILE "/home/.layout"
+enum { CAND_MAX = 32, LAY_MAX = 32 };
+static const char *const fixed_keys[8] = {"files", "editor", "term", "pkg", "mem", "feed", "set", "web"};
+static struct cell cand[CAND_MAX];
+static int cand_n;
+static char lay_key[LAY_MAX][FS_NAME + 8];
+static int lay_n;
+static char lay_hide[LAY_MAX][FS_NAME + 8];
+static int lay_hide_n;
+static int lay_loaded;
+
+static void cand_add(int kind, const char *label, const char *arg, const char *key) {
+    if (cand_n < CAND_MAX) {
+        cell_put(&cand[cand_n++], kind, label, arg, key);
     }
+}
+
+/* Every cell that could be shown: fixed ones, Браузер, programs, pins. */
+static void collect_cands(void) {
+    cand_n = 0;
+    for (int i = 0; i < 7; i++) {
+        cand_add(i, fixed_labels[i], "", fixed_keys[i]);
+    }
+    cand_add(K_WEB, "Браузер", "", "web");
     char name[FS_NAME];
+    char key[FS_NAME + 8];
     int installed = 0;
     int app = 0;
     for (int i = 0; pkg_info(i, name, sizeof name, &installed, &app); i++) {
         if (installed && app) {
-            cell_add(K_APP, name, name);
+            s_cat(key, s_cat(key, 0, "app:", sizeof key), name, sizeof key);
+            cand_add(K_APP, name, name, key);
         }
     }
     for (int i = 0; pins_get(i, name, sizeof name); i++) {
@@ -662,7 +691,97 @@ static int rebuild_cells(void) {
                 base = c + 1;
             }
         }
-        cell_add(K_PIN, base, name);
+        s_cat(key, s_cat(key, 0, "pin:", sizeof key), name, sizeof key);
+        cand_add(K_PIN, base, name, key);
+    }
+}
+
+static int lay_find(char list[][FS_NAME + 8], int n, const char *key) {
+    for (int i = 0; i < n; i++) {
+        if (s_eq(list[i], key)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void lay_drop(char list[][FS_NAME + 8], int *n, int at) {
+    for (int i = at + 1; i < *n; i++) {
+        s_copy(list[i - 1], list[i], FS_NAME + 8);
+    }
+    (*n)--;
+}
+
+static void lay_load(void) {
+    lay_loaded = 1;
+    lay_n = 0;
+    lay_hide_n = 0;
+    const unsigned char *data = 0;
+    unsigned int len = 0;
+    if (!fs_get(LAYOUT_FILE, &data, &len)) {
+        return;
+    }
+    unsigned int i = 0;
+    while (i < len) {
+        char line[FS_NAME + 8];
+        unsigned int n = 0;
+        while (i < len && data[i] != '\n') {
+            if (n + 1 < sizeof line && data[i] != '\r') {
+                line[n++] = (char)data[i];
+            }
+            i++;
+        }
+        i++;
+        line[n] = 0;
+        if (line[0] == '-' && line[1] != 0 && lay_hide_n < LAY_MAX) {
+            s_copy(lay_hide[lay_hide_n++], line + 1, FS_NAME + 8);
+        } else if (line[0] != 0 && line[0] != '-' && lay_n < LAY_MAX && lay_find(lay_key, lay_n, line) < 0) {
+            s_copy(lay_key[lay_n++], line, FS_NAME + 8);
+        }
+    }
+}
+
+static void lay_save(void) {
+    static char text[LAY_MAX * 2 * (FS_NAME + 10)];
+    unsigned int n = 0;
+    for (int i = 0; i < lay_n; i++) {
+        n = s_cat(text, n, lay_key[i], sizeof text);
+        n = s_cat(text, n, "\n", sizeof text);
+    }
+    for (int i = 0; i < lay_hide_n; i++) {
+        n = s_cat(text, n, "-", sizeof text);
+        n = s_cat(text, n, lay_hide[i], sizeof text);
+        n = s_cat(text, n, "\n", sizeof text);
+    }
+    if (n == 0) {
+        n = s_cat(text, 0, "\n", sizeof text);
+    }
+    fs_put(LAYOUT_FILE, text, n);
+}
+
+/* The layout order first, then the rest; hidden cells left out. Prints
+ * "cells: ..." on the serial line whenever the set changes. */
+static int rebuild_cells(void) {
+    if (!lay_loaded) {
+        lay_load();
+    }
+    collect_cands();
+    cell_count = 0;
+    for (int k = 0; k < lay_n && cell_count < CELL_MAX; k++) {
+        if (lay_find(lay_hide, lay_hide_n, lay_key[k]) >= 0) {
+            continue;
+        }
+        for (int c = 0; c < cand_n; c++) {
+            if (s_eq(cand[c].key, lay_key[k])) {
+                cells[cell_count++] = cand[c];
+                break;
+            }
+        }
+    }
+    for (int c = 0; c < cand_n && cell_count < CELL_MAX; c++) {
+        if (lay_find(lay_key, lay_n, cand[c].key) < 0 && lay_find(lay_hide, lay_hide_n, cand[c].key) < 0) {
+            cells[cell_count++] = cand[c];
+        }
     }
     char line[512];
     unsigned int used = s_cat(line, 0, "cells:", sizeof line);
@@ -670,8 +789,11 @@ static int rebuild_cells(void) {
         used = s_cat(line, used, " ", sizeof line);
         used = s_cat(line, used, cells[i].kind == K_PIN ? cells[i].arg : cells[i].label, sizeof line);
     }
-    if (focus >= cell_count && focus != CELL_CORE) {
+    if (focus >= cell_count && focus != CELL_CORE && focus != CELL_PEER) {
         focus = -1;
+    }
+    if (edit_picked >= cell_count) {
+        edit_picked = -1;
     }
     layout_cells();
     if (s_eq(line, cells_line)) {
@@ -681,6 +803,68 @@ static int rebuild_cells(void) {
     console_puts(line);
     console_putc('\n');
     return 1;
+}
+
+/* The shown order becomes explicit, so a move keeps everything else put. */
+static void lay_materialize(void) {
+    lay_n = 0;
+    for (int i = 0; i < cell_count && lay_n < LAY_MAX; i++) {
+        s_copy(lay_key[lay_n++], cells[i].key, FS_NAME + 8);
+    }
+}
+
+static void lay_say(void) {
+    char line[600];
+    unsigned int n = s_cat(line, 0, "layout:", sizeof line);
+    for (int i = 0; i < cell_count; i++) {
+        n = s_cat(line, n, " ", sizeof line);
+        n = s_cat(line, n, cells[i].key, sizeof line);
+    }
+    if (lay_hide_n > 0) {
+        n = s_cat(line, n, " (hidden:", sizeof line);
+        for (int i = 0; i < lay_hide_n; i++) {
+            n = s_cat(line, n, " ", sizeof line);
+            n = s_cat(line, n, lay_hide[i], sizeof line);
+        }
+        n = s_cat(line, n, ")", sizeof line);
+    }
+    s_cat(line, n, "\n", sizeof line);
+    console_puts(line);
+}
+
+/* A candidate by key, label or argument ("web", "Браузер", "/home/docs"). */
+static int cand_named(const char *name) {
+    if (!lay_loaded) {
+        lay_load();
+    }
+    collect_cands();
+    for (int c = 0; c < cand_n; c++) {
+        if (s_eq(cand[c].key, name) || s_eq(cand[c].label, name) || (cand[c].arg[0] != 0 && s_eq(cand[c].arg, name))) {
+            return c;
+        }
+    }
+    if (s_eq(name, "Браузер") || s_eq(name, "browser")) {
+        return 7;
+    }
+    return -1;
+}
+
+static int cell_index_of(const char *key) {
+    for (int i = 0; i < cell_count; i++) {
+        if (s_eq(cells[i].key, key)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int cell_of_kind(int kind) {
+    for (int i = 0; i < cell_count; i++) {
+        if (cells[i].kind == kind) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static const short sin_tab[91] = {0,18,36,54,71,89,107,125,143,160,178,195,213,230,248,265,282,299,316,333,350,367,384,400,416,433,449,465,481,496,512,527,543,558,573,587,602,616,630,644,658,672,685,698,711,724,737,749,761,773,784,796,807,818,828,839,849,859,868,878,887,896,904,912,920,928,935,943,949,956,962,968,974,979,984,989,994,998,1002,1005,1008,1011,1014,1016,1018,1020,1022,1023,1023,1024,1024};
@@ -751,12 +935,12 @@ static void draw_cell(int i) {
     struct cell *c = &cells[i];
     int cx = cell_cx[i];
     int cy = cell_cy[i];
-    int amber = c->kind == K_FEED || c->kind == K_SET || c->kind == K_APP;
+    int amber = edit_mode || c->kind == K_FEED || c->kind == K_SET || c->kind == K_APP;
     unsigned int line = amber ? AMBER : CYAN;
     unsigned int mid = amber ? AMBER_DIM : CYAN_DIM;
     unsigned int outer = amber ? AMBER_FAINT : CYAN_FAINT;
     unsigned int inside = CELL;
-    if (highlighted() == i) {
+    if (highlighted() == i || (edit_mode && edit_picked == i)) {
         outer = mid;
         mid = amber ? AMBER_MID : CYAN_MID;
         line = YELLOW;
@@ -1113,6 +1297,7 @@ static const char *panel_title(void) {
     case P_FEED: return "Лента";
     case P_SET: return "Настройки";
     case P_TASKS: return "Задачи";
+    case P_WEB: return "Браузер";
     default: return "";
     }
 }
@@ -1124,8 +1309,10 @@ static int pkg_row_count;
 /* Everything in the panel that can be clicked, tapped or picked with the
  * arrows + Enter (TV remote) is an item; the same code runs either way. */
 enum { A_CLOSE = 0, A_ROW, A_UP, A_DOWN, A_PKG, A_LAYOUT, A_REBOOT, A_POWEROFF, A_KILL, A_CHIP, A_CARD, A_FEED_PREV,
-       A_FEED_NEXT, A_TO_FEED, A_BACK };
-enum { ITEM_MAX = 32 };
+       A_FEED_NEXT, A_TO_FEED, A_BACK, A_EDIT_CELLS, A_WEB_ADDR, A_WEB_RELOAD, A_WEB_LINK, A_WEB_UP, A_WEB_DOWN };
+enum { ITEM_MAX = 96 };
+static int web_top;      /* first page line on screen */
+static int web_vis = 1;  /* page lines that fit */
 static int it_n;
 static int it_x[ITEM_MAX], it_y[ITEM_MAX], it_w[ITEM_MAX], it_h[ITEM_MAX], it_act[ITEM_MAX], it_arg[ITEM_MAX];
 /* Navigation history of the open window: every step inside it (a folder, a
@@ -1137,6 +1324,8 @@ static struct nav_step nav_stack[NAV_MAX];
 static int nav_n;
 static void nav_push(void);
 static void nav_back(void);
+static void bar_set(const char *s);
+static void draw_bar(void);
 static int pfocus = -1; /* focused item, -1 = none (mouse use) */
 static int pfocus_pending; /* the panel is being opened with Enter */
 
@@ -1522,7 +1711,106 @@ static void draw_panel_body(void) {
         item(x0, y0 + P(10) + step, inner_w, h, A_REBOOT, 0);
         button(x0, y0 + P(10) + 2 * step, inner_w, h, "Выключить", RED_MID, RED_DIM);
         item(x0, y0 + P(10) + 2 * step, inner_w, h, A_POWEROFF, 0);
-        ui_text(x0, y0 + P(30) + 3 * step, "Ctrl+Пробел или Alt+Shift", MUTED, 1);
+        button(x0, y0 + P(10) + 3 * step, inner_w, h, edit_mode ? "Ячейки: готово" : "Ячейки: правка", AMBER_MID, CELL);
+        item(x0, y0 + P(10) + 3 * step, inner_w, h, A_EDIT_CELLS, 0);
+        ui_text(x0, y0 + P(30) + 4 * step, "Ctrl+Пробел или Alt+Shift", MUTED, 1);
+        return;
+    }
+    if (panel == P_WEB) {
+        int cw = t1 + 2;
+        int rw = P(150);
+        int ah = BTN_H;
+        int aw = inner_w - rw - P(10);
+        frame_rect(x0, y0, aw, ah, CYAN_MID, CELL);
+        char u[WEB_URL_MAX];
+        s_copy(u, web_url(), sizeof u);
+        utf8_clip(u, (aw - P(20)) / cw);
+        ui_text(x0 + P(10), y0 + (ah - t1) / 2, u, WHITE, 1);
+        item(x0, y0, aw, ah, A_WEB_ADDR, 0);
+        button(x0 + inner_w - rw, y0, rw, ah, "Обновить", CYAN_MID, CELL);
+        item(x0 + inner_w - rw, y0, rw, ah, A_WEB_RELOAD, 0);
+        int ty = y0 + ah + P(10);
+        char t[160];
+        s_copy(t, web_title()[0] ? web_title() : web_url(), sizeof t);
+        utf8_clip(t, inner_w / (t2 + 2));
+        ui_text(x0, ty, t, CYAN, 2);
+        int ly = ty + t2 + P(14);
+        web_layout(inner_w / cw);
+        web_vis = (SCROLL_Y - P(8) - ly) / TERM_LINE_H;
+        if (web_vis < 1) {
+            web_vis = 1;
+        }
+        int lines = web_line_count();
+        if (web_top > lines - web_vis) {
+            web_top = lines - web_vis;
+        }
+        if (web_top < 0) {
+            web_top = 0;
+        }
+        for (int i = 0; i < web_vis && web_top + i < lines; i++) {
+            int st = 0;
+            const char *ln = web_line(web_top + i, &st);
+            unsigned int col = st == WS_HEAD ? YELLOW : st == WS_PRE ? CYAN_MID : st == WS_MUTED ? MUTED : st == WS_ERROR ? RED : WHITE;
+            if (st == WS_PRE) {
+                col = 0x009fe8c0u;
+            }
+            ui_text(x0, ly + i * TERM_LINE_H, ln, col, 1);
+        }
+        for (int k = 0; k < web_span_count(); k++) {
+            const struct web_span *sp = web_span_at(k);
+            int row = sp->line - web_top;
+            if (row < 0 || row >= web_vis || sp->link < 0 || sp->chars <= 0) {
+                continue;
+            }
+            int st = 0;
+            const char *ln = web_line(sp->line, &st);
+            char part[WEB_LINE_CAP + 8];
+            unsigned int a = 0;
+            int c = 0;
+            while (ln[a] != 0 && c < sp->col) {
+                a++;
+                while (ln[a] != 0 && utf8_is_cont((unsigned char)ln[a])) {
+                    a++;
+                }
+                c++;
+            }
+            unsigned int b = a;
+            c = 0;
+            while (ln[b] != 0 && c < sp->chars) {
+                b++;
+                while (ln[b] != 0 && utf8_is_cont((unsigned char)ln[b])) {
+                    b++;
+                }
+                c++;
+            }
+            unsigned int m = 0;
+            for (unsigned int j = a; j < b && m + 1 < sizeof part; j++) {
+                part[m++] = ln[j];
+            }
+            part[m] = 0;
+            int sx = x0 + sp->col * cw;
+            int sy = ly + row * TERM_LINE_H;
+            ui_text(sx, sy, part, CYAN, 1);
+            fill(sx, sy + t1 + 1, sp->chars * cw - 2, 1, CYAN_MID);
+            item(sx - 2, sy - P(3), sp->chars * cw + 2, t1 + P(6), A_WEB_LINK, sp->link);
+        }
+        int bw = P(70);
+        button(x0, SCROLL_Y, bw, BTN_H, "^", CYAN_MID, CELL);
+        item(x0, SCROLL_Y, bw, BTN_H, A_WEB_UP, 0);
+        button(x0 + bw + P(12), SCROLL_Y, bw, BTN_H, "v", CYAN_MID, CELL);
+        item(x0 + bw + P(12), SCROLL_Y, bw, BTN_H, A_WEB_DOWN, 0);
+        char s[64];
+        unsigned int n = s_cat(s, 0, "строки ", sizeof s);
+        n = u_cat(s, n, (unsigned int)(lines == 0 ? 0 : web_top + 1), sizeof s);
+        n = s_cat(s, n, "-", sizeof s);
+        n = u_cat(s, n, (unsigned int)(web_top + web_vis < lines ? web_top + web_vis : lines), sizeof s);
+        n = s_cat(s, n, " из ", sizeof s);
+        u_cat(s, n, (unsigned int)lines, sizeof s);
+        ui_text(x0 + 2 * bw + P(24), SCROLL_Y + (BTN_H - t1) / 2, s, MUTED, 1);
+        if (inner_w > P(700)) {
+            ui_text(x0 + 2 * bw + P(24) + 22 * cw, SCROLL_Y + (BTN_H - t1) / 2,
+                    "Tab/стрелки: ссылки, Enter: открыть, Backspace: назад, Esc: закрыть", MUTED, 1);
+        }
         return;
     }
     if (panel == P_TASKS) {
@@ -1592,7 +1880,7 @@ static void draw_panel(void) {
         ui_text(CLOSE_X + CLOSE_W + P(14), title_y, panel_title(), CYAN, 2);
     } else {
         int tx = PANEL_X + P(16);
-        if (nav_n > 0) {
+        if (nav_n > 0 || (panel == P_WEB && web_depth() > 0)) {
             /* one step back inside this window */
             button(PANEL_X + P(8), CLOSE_Y, CLOSE_W, CLOSE_H, "<", CYAN_MID, CELL);
             item(PANEL_X + P(8), CLOSE_Y, CLOSE_W, CLOSE_H, A_BACK, 0);
@@ -1603,7 +1891,7 @@ static void draw_panel(void) {
         text_c(CLOSE_X + CLOSE_W / 2, CLOSE_Y + (CLOSE_H - 8 * ts(2)) / 2, "X", WHITE, 2);
     }
     draw_panel_body();
-    if (panel != P_FEED) {
+    if (panel != P_FEED && panel != P_WEB) {
         /* «В ленту»: this panel's history on the timeline (tap / D-pad path). */
         int fw = utf8_chars("В ленту") * (8 * ts(1) + 2) + P(20);
         int fx = portrait ? PANEL_X + PANEL_W - fw - P(8) : CLOSE_X - fw - P(8);
@@ -1647,7 +1935,12 @@ static void link_end(const char *name, int *x, int *y) {
     }
     int c = cell_named(name);
     if (c < 0) {
-        c = K_PKG; /* libraries have no cell: the Пакеты cell stands in */
+        c = cell_of_kind(K_PKG); /* libraries have no cell: the Пакеты cell stands in */
+    }
+    if (c < 0) {
+        *x = CORE_X;
+        *y = CORE_Y;
+        return;
     }
     *x = cell_cx[c];
     *y = cell_cy[c];
@@ -1958,7 +2251,7 @@ static void show_home(void) {
 static void open_panel(int which) {
     view = VIEW_HOME;
     panel = which;
-    set_mode(1, which == P_FEED);
+    set_mode(1, which == P_FEED || which == P_WEB);
     pfocus = 1; /* arrows work at once: focus starts on the first row */
     mouse_arm();
     redraw_all();
@@ -1999,6 +2292,78 @@ static void open_editor(const char *file) {
     editor_open(file);
 }
 
+/* ---- Браузер window ---- */
+static void say_pfocus(void);
+
+static void web_redraw(void) {
+    mouse_arm();
+    redraw_panel();
+}
+
+static void web_scroll(int step) {
+    int before = web_top;
+    web_top += step;
+    int lines = web_line_count();
+    if (web_top > lines - web_vis) {
+        web_top = lines - web_vis;
+    }
+    if (web_top < 0) {
+        web_top = 0;
+    }
+    if (web_top != before) {
+        char s[24];
+        u_cat(s, s_cat(s, 0, "web: scroll ", sizeof s), (unsigned int)web_top, sizeof s);
+        console_puts(s);
+        console_putc('\n');
+        web_redraw();
+    }
+}
+
+/* Opens the browser window on URL; fresh = a new window (no page history). */
+static void open_web(const char *url, int fresh) {
+    web_top = 0;
+    if (fresh || panel != P_WEB) {
+        web_start(url);
+    } else {
+        web_open(url);
+    }
+    open_panel(P_WEB);
+    pfocus = -1; /* arrows scroll the page until Tab picks a link */
+    redraw_panel();
+}
+
+void desktop_browse(const char *url) {
+    if (panel == P_WEB && view == VIEW_HOME) {
+        web_top = 0;
+        web_open(url);
+        pfocus = -1;
+        web_redraw();
+        return;
+    }
+    nav_n = 0;
+    open_web(url, 1);
+}
+
+void desktop_web(int action, int arg) {
+    if (panel != P_WEB) {
+        open_panel(P_WEB);
+    }
+    web_top = 0;
+    if (action == 2) {
+        nav_back();
+        return;
+    }
+    if (action == 3) {
+        web_reload();
+    } else if (action == 4) {
+        web_follow(arg);
+        pfocus = -1;
+    }
+    web_redraw();
+}
+
+static void edit_set(int on);
+
 /* Runs one bar line: output goes to the terminal panel and the bar. */
 static void bar_exec(const char *cmd, int show_term) {
     static char out[2048];
@@ -2034,6 +2399,18 @@ static void bar_exec(const char *cmd, int show_term) {
         }
         bar_out[0] = 0;
         open_feed(f);
+        return;
+    }
+    if (s_starts(cmd, "browse") || s_eq(cmd, "web") || s_starts(cmd, "web ")) {
+        bar_out[0] = 0;
+        cursor_erase();
+        journal_add('c', cmd);
+        if (web_command(cmd)) {
+            return;
+        }
+    }
+    if (s_eq(cmd, "layout edit")) {
+        edit_set(!edit_mode);
         return;
     }
     if (s_eq(cmd, "clear")) {
@@ -2116,6 +2493,7 @@ static void open_cell(int i) {
         break;
     }
     case K_PIN: open_files(c->arg); break;
+    case K_WEB: open_web("about:home", 1); break;
     default: break;
     }
 }
@@ -2173,6 +2551,18 @@ static void show_file(int row) {
         return;
     }
     journal_add('o', path);
+    {
+        unsigned int nl = 0;
+        while (row_name[row][nl] != 0) {
+            nl++;
+        }
+        const char *e = row_name[row] + nl;
+        if ((nl > 5 && s_eq(e - 5, ".html")) || (nl > 4 && s_eq(e - 4, ".htm"))) {
+            nav_push(); /* Back from the first page returns to this folder */
+            open_web(path, 1);
+            return;
+        }
+    }
     const char *viewer = viewer_for_name(row_name[row]);
     launch_viewer(viewer, bytes, length, row_name[row]);
 }
@@ -2327,6 +2717,12 @@ static void nav_push(void) {
 }
 
 static void nav_back(void) {
+    if (panel == P_WEB && view == VIEW_HOME && web_back()) {
+        web_top = 0;
+        pfocus = -1;
+        web_redraw();
+        return;
+    }
     if (nav_n == 0) {
         show_home();
         return;
@@ -2375,6 +2771,36 @@ static void panel_act(int k) {
     }
     if (act == A_ROW) {
         show_file(arg);
+        return;
+    }
+    if (act == A_WEB_LINK) {
+        web_top = 0;
+        web_follow(arg);
+        pfocus = -1;
+        web_redraw();
+        return;
+    }
+    if (act == A_WEB_RELOAD) {
+        web_reload();
+        web_redraw();
+        return;
+    }
+    if (act == A_WEB_ADDR) {
+        bar_set(web_url());
+        cursor_erase();
+        draw_bar();
+        cursor_paint();
+        mouse_arm();
+        return;
+    }
+    if (act == A_WEB_UP || act == A_WEB_DOWN) {
+        web_scroll(act == A_WEB_UP ? -(web_vis - 1) : web_vis - 1);
+        mouse_arm();
+        return;
+    }
+    if (act == A_EDIT_CELLS) {
+        edit_set(!edit_mode);
+        mouse_arm();
         return;
     }
     if (act == A_CHIP && arg != feed_filter) {
@@ -2525,6 +2951,10 @@ static void panel_nav(int dx, int dy) {
                 return;
             }
         }
+        if (next < 0 && dy != 0 && panel == P_WEB) {
+            web_scroll(dy > 0 ? web_vis - 1 : -(web_vis - 1));
+            return;
+        }
         if (next < 0 && dy != 0 && panel == P_FILES) {
             /* Past the last visible row: scroll the list. */
             if (dy > 0 && file_top + FROW_VIS < file_rows) {
@@ -2560,6 +2990,20 @@ static void panel_nav(int dx, int dy) {
     u_cat(s, 0, (unsigned int)pfocus, sizeof s);
     console_puts(s);
     console_putc('\n');
+    say_pfocus();
+}
+
+static void say_pfocus(void) {
+    if (panel != P_WEB || pfocus < 0 || pfocus >= it_n || it_act[pfocus] != A_WEB_LINK) {
+        return;
+    }
+    char s[WEB_URL_MAX + 32];
+    unsigned int n = s_cat(s, 0, "focus: link ", sizeof s);
+    n = u_cat(s, n, (unsigned int)(it_arg[pfocus] + 1), sizeof s);
+    n = s_cat(s, n, " ", sizeof s);
+    n = s_cat(s, n, web_link(it_arg[pfocus]), sizeof s);
+    s_cat(s, n, "\n", sizeof s);
+    console_puts(s);
 }
 
 /* Which cell the typed command is about, for the hint highlight. */
@@ -2618,15 +3062,16 @@ static int hint_for(const char *cmd) {
     static const char *const files_words[] = {"ls", "cd", "cat", "mkdir", "rmdir", "mv", "cp", "rm", "pwd", "write", "pin", "unpin"};
     for (unsigned int k = 0; k < sizeof files_words / sizeof files_words[0]; k++) {
         if (s_eq(w0, files_words[k])) {
-            return K_FILES;
+            return cell_of_kind(K_FILES);
         }
     }
-    if (s_eq(w0, "edit")) return K_EDITOR;
-    if (s_eq(w0, "pkg")) return K_PKG;
-    if (s_eq(w0, "mem") || s_eq(w0, "heap") || s_eq(w0, "alloc")) return K_MEM;
-    if (s_eq(w0, "reboot") || s_eq(w0, "poweroff")) return K_SET;
+    if (s_eq(w0, "browse") || s_eq(w0, "web")) return cell_of_kind(K_WEB);
+    if (s_eq(w0, "edit")) return cell_of_kind(K_EDITOR);
+    if (s_eq(w0, "pkg")) return cell_of_kind(K_PKG);
+    if (s_eq(w0, "mem") || s_eq(w0, "heap") || s_eq(w0, "alloc")) return cell_of_kind(K_MEM);
+    if (s_eq(w0, "reboot") || s_eq(w0, "poweroff")) return cell_of_kind(K_SET);
     if (s_eq(w0, "ps") || s_eq(w0, "kill") || s_eq(w0, "spawn")) return CELL_CORE;
-    return K_TERM;
+    return cell_of_kind(K_TERM);
 }
 
 static void hint_update(void) {
@@ -2706,8 +3151,242 @@ static void focus_move(int step) {
     focus_say(f);
 }
 
+/* ---- cells edit mode: reorder (drag / Enter+arrows), hide (x) ---- */
+static void lay_changed(void) {
+    lay_save();
+    rebuild_cells();
+    if (desktop_on && view == VIEW_HOME && !editor_active()) {
+        redraw_all();
+    }
+}
+
+static void lay_move_index(int from, int to) {
+    if (from < 0 || from >= cell_count || to < 0 || to >= cell_count || from == to) {
+        return;
+    }
+    lay_materialize();
+    char key[FS_NAME + 8];
+    s_copy(key, lay_key[from], sizeof key);
+    lay_drop(lay_key, &lay_n, from);
+    for (int i = lay_n; i > to; i--) {
+        s_copy(lay_key[i], lay_key[i - 1], FS_NAME + 8);
+    }
+    s_copy(lay_key[to], key, FS_NAME + 8);
+    lay_n++;
+    lay_changed();
+}
+
+static void lay_hide_index(int i) {
+    if (i < 0 || i >= cell_count) {
+        return;
+    }
+    lay_materialize();
+    if (lay_hide_n < LAY_MAX && lay_find(lay_hide, lay_hide_n, cells[i].key) < 0) {
+        s_copy(lay_hide[lay_hide_n++], cells[i].key, FS_NAME + 8);
+    }
+    lay_drop(lay_key, &lay_n, i);
+    lay_changed();
+    lay_say();
+}
+
+static void edit_set(int on) {
+    edit_mode = on;
+    edit_picked = -1;
+    console_puts(on ? "layout: edit on\n" : "layout: edit off\n");
+    if (!desktop_on) {
+        return;
+    }
+    if (on) {
+        nav_n = 0;
+        view = VIEW_HOME;
+        panel = P_NONE;
+        send_mode = 0;
+        set_docked(0);
+        pfocus = -1;
+        s_copy(bar_out, "Правка: Enter взять, стрелки, x убрать, Esc готово", sizeof bar_out);
+    } else {
+        bar_out[0] = 0;
+    }
+    mouse_arm();
+    redraw_all();
+}
+
+static void say_layout_key(const char *what, int i) {
+    if (i < 0 || i >= cell_count) {
+        return;
+    }
+    console_puts("layout: ");
+    console_puts(what);
+    console_puts(" ");
+    console_puts(cells[i].key);
+    console_putc('\n');
+}
+
+/* Keys in edit mode; returns 1 when the key was used. */
+static int edit_key(char ch) {
+    if (ch == DESK_ESC || ch == '\b') {
+        edit_set(0);
+        return 1;
+    }
+    if (ch == '\t') {
+        focus_move(1);
+        return 1;
+    }
+    int cell = focus >= 0 && focus < cell_count ? focus : -1;
+    if (ch == '\n') {
+        if (edit_picked >= 0) {
+            say_layout_key("placed", edit_picked);
+            edit_picked = -1;
+            redraw_all();
+        } else if (cell >= 0) {
+            edit_picked = cell;
+            say_layout_key("picked", cell);
+            redraw_all();
+        }
+        return 1;
+    }
+    if ((ch == 'x' || ch == '-' || ch == 127) && cell >= 0) {
+        edit_picked = -1;
+        lay_hide_index(cell);
+        return 1;
+    }
+    if (ch == DESK_LEFT || ch == DESK_RIGHT || ch == DESK_UP || ch == DESK_DOWN) {
+        if (edit_picked >= 0) {
+            int to = edit_picked + (ch == DESK_LEFT || ch == DESK_UP ? -1 : 1);
+            if (to < 0 || to >= cell_count) {
+                return 1;
+            }
+            int from = edit_picked;
+            edit_picked = to;
+            focus = to;
+            lay_move_index(from, to);
+            focus_say(to);
+        } else {
+            home_nav(ch == DESK_LEFT ? -1 : ch == DESK_RIGHT ? 1 : 0, ch == DESK_UP ? -1 : ch == DESK_DOWN ? 1 : 0);
+        }
+        return 1;
+    }
+    return 1; /* everything else waits until the edit is done */
+}
+
+static const char *skip_sp(const char *s) {
+    while (*s == ' ') {
+        s++;
+    }
+    return s;
+}
+
+/* `layout [list] | move NAME POS | add NAME | remove NAME | reset | edit` */
+int layout_command(const char *line) {
+    if (!s_starts(line, "layout") || (line[6] != 0 && line[6] != ' ')) {
+        return 0;
+    }
+    const char *a = skip_sp(line + 6);
+    if (!lay_loaded) {
+        lay_load();
+    }
+    rebuild_cells();
+    if (a[0] == 0 || s_eq(a, "list")) {
+        lay_say();
+        return 1;
+    }
+    if (s_eq(a, "edit")) {
+        edit_set(!edit_mode);
+        return 1;
+    }
+    if (s_eq(a, "reset")) {
+        lay_n = 0;
+        lay_hide_n = 0;
+        lay_changed();
+        lay_say();
+        return 1;
+    }
+    char name[FS_NAME + 8];
+    int remove = s_starts(a, "remove ") || s_starts(a, "hide ");
+    int add = s_starts(a, "add ") || s_starts(a, "show ");
+    int move = s_starts(a, "move ");
+    if (!remove && !add && !move) {
+        console_puts("layout: usage: layout list | move NAME POS | add NAME | remove NAME | reset | edit\n");
+        return 1;
+    }
+    a = skip_sp(a + (move ? 5 : remove ? (a[0] == 'r' ? 7 : 5) : (a[0] == 'a' ? 4 : 5)));
+    unsigned int n = 0;
+    while (a[n] != 0 && a[n] != ' ' && n + 1 < sizeof name) {
+        name[n] = a[n];
+        n++;
+    }
+    name[n] = 0;
+    if (add && name[0] == '/' && cand_named(name) < 0) {
+        shell_pin(name, 1); /* a folder: pin it, the pin becomes a cell */
+    }
+    int c = cand_named(name);
+    if (c < 0) {
+        console_puts("layout: no such cell: ");
+        console_puts(name);
+        console_putc('\n');
+        return 1;
+    }
+    char key[FS_NAME + 8];
+    s_copy(key, cand[c].key, sizeof key);
+    if (move) {
+        const char *q = skip_sp(a + n);
+        int pos = 0;
+        while (*q >= '0' && *q <= '9') {
+            pos = pos * 10 + (*q++ - '0');
+        }
+        int from = cell_index_of(key);
+        if (from < 0 || pos < 1) {
+            console_puts("layout: move NAME POS (the cell must be shown, POS from 1)\n");
+            return 1;
+        }
+        lay_move_index(from, (pos > cell_count ? cell_count : pos) - 1);
+    } else if (remove) {
+        int at = cell_index_of(key);
+        if (at >= 0) {
+            lay_hide_index(at);
+            return 1;
+        }
+    } else {
+        int h = lay_find(lay_hide, lay_hide_n, key);
+        if (h >= 0) {
+            lay_drop(lay_hide, &lay_hide_n, h);
+        }
+        lay_materialize();
+        int k = lay_find(lay_key, lay_n, key);
+        if (k >= 0) {
+            lay_drop(lay_key, &lay_n, k);
+        }
+        if (lay_n < LAY_MAX) {
+            s_copy(lay_key[lay_n++], key, FS_NAME + 8);
+        }
+        lay_changed();
+    }
+    lay_say();
+    return 1;
+}
+
 static void bar_key(char ch) {
     unsigned char u = (unsigned char)ch;
+    if (edit_mode && panel == P_NONE && bar_len == 0 && edit_key(ch)) {
+        return;
+    }
+    if (panel == P_WEB && ch == '\n' && bar_len > 0 && web_looks_like_url(bar_cmd)) {
+        char url[BAR_CAP];
+        s_copy(url, bar_cmd, sizeof url);
+        bar_set("");
+        hint = -1;
+        bar_out[0] = 0;
+        cursor_erase();
+        draw_bar();
+        desktop_browse(url);
+        return;
+    }
+    if (panel == P_WEB && bar_len == 0 &&
+        (ch == DESK_PGUP || ch == DESK_PGDN || (pfocus < 0 && (ch == DESK_UP || ch == DESK_DOWN)))) {
+        int page = web_vis > 1 ? web_vis - 1 : 1;
+        web_scroll(ch == DESK_PGUP ? -page : ch == DESK_PGDN ? page : ch == DESK_UP ? -3 : 3);
+        return;
+    }
     if (ch == '\n') {
         if (bar_len == 0) {
             if (panel != P_NONE && pfocus >= 0) {
@@ -2732,6 +3411,7 @@ static void bar_key(char ch) {
             if (panel != P_NONE && it_n > 0) {
                 pfocus = (pfocus + 1) % it_n;
                 redraw_panel();
+                say_pfocus();
             } else {
                 focus_move(1);
             }
@@ -2910,6 +3590,12 @@ void desktop_layout_changed(void) {
     cursor_paint();
 }
 
+/* Press on a cell, release on it: open (a long hold starts the edit mode).
+ * In the edit mode a drag moves a cell and a tap on the core ends it. */
+static int press_cell = -1;
+static unsigned int press_tick;
+enum { LONG_PRESS_TICKS = 60 };
+
 void desktop_mouse(int x, int y, int left) {
     if (!desktop_on || editor_active()) {
         return;
@@ -2917,11 +3603,36 @@ void desktop_mouse(int x, int y, int left) {
     cursor_x = x;
     cursor_y = y;
     int pressed = left && !pointer_down;
+    int released = !left && pointer_down;
     pointer_down = left;
+    if (released) {
+        int from = press_cell;
+        press_cell = -1;
+        if (from >= 0 && view == VIEW_HOME && panel == P_NONE) {
+            int hit = cell_at(x, y);
+            if (edit_mode) {
+                if (hit >= 0 && hit < cell_count && hit != from) {
+                    lay_move_index(from, hit);
+                    focus = hit;
+                    focus_say(hit);
+                }
+                return;
+            }
+            if (clock_ticks_total() - press_tick >= LONG_PRESS_TICKS) {
+                edit_set(1);
+                return;
+            }
+            open_cell(from);
+            return;
+        }
+        cursor_move();
+        return;
+    }
     if (!pressed) {
         cursor_move();
         return;
     }
+    press_cell = -1;
     if (view == VIEW_VIEWER) {
         if (back_hit(x, y)) {
             viewer_back = 1;
@@ -2942,6 +3653,25 @@ void desktop_mouse(int x, int y, int left) {
         return;
     }
     int hit = cell_at(x, y);
+    if (edit_mode) {
+        if (hit == CELL_CORE) {
+            edit_set(0);
+        } else if (hit >= 0 && hit < cell_count) {
+            press_cell = hit;
+        }
+        cursor_move();
+        return;
+    }
+    if (hit >= 0 && hit < cell_count) {
+        if (panel != P_NONE) {
+            open_cell(hit); /* a docked window is open: switch at once */
+            return;
+        }
+        press_cell = hit;
+        press_tick = clock_ticks_total();
+        cursor_move();
+        return;
+    }
     if (hit >= 0) {
         open_cell(hit);
         return;
@@ -3335,6 +4065,7 @@ void cmd_desktop(void) {
     core_sample();
     console_puts("labels: Файлы Редактор Терминал Пакеты Память Лента Настройки\n");
     cells_line[0] = 0;
+    lay_loaded = 0;
     show_home();
     timer_start();
 }
