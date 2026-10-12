@@ -26,10 +26,7 @@ const pkgCc = [
   "-fno-asynchronous-unwind-tables",
   "-fno-unwind-tables",
   "-fno-tree-loop-distribute-patterns",
-  "-mno-red-zone",
   "-fcf-protection=none",
-  "-m64",
-  "-mcmodel=small",
   "-Os",
   "-Wall",
   "-Wextra",
@@ -38,6 +35,8 @@ const pkgCc = [
 
 /** Relocations a flat binary loaded at any address can still honour. */
 const PC_RELATIVE = new Set(["R_X86_64_PC32", "R_X86_64_PLT32"]);
+/** i686 PIC reaches its data through the GOT base, which ld resolves inside the image. */
+const PC_RELATIVE_I686 = new Set(["R_386_PC32", "R_386_PLT32", "R_386_GOTPC", "R_386_GOTOFF"]);
 
 export async function readManifests(root: string): Promise<PackageManifest[]> {
   const dir = path.join(root, "packages");
@@ -65,7 +64,15 @@ export async function readManifests(root: string): Promise<PackageManifest[]> {
 }
 
 /** Builds every packages/<name>/*.c into one flat binary and writes the repository blob. */
-export async function buildPackages(root: string, buildDir: string, exec: Exec): Promise<string> {
+export async function buildPackages(
+  root: string,
+  buildDir: string,
+  exec: Exec,
+  arch: "x86_64" | "i686" = "x86_64",
+): Promise<string> {
+  const x64 = arch === "x86_64";
+  const archCc = x64 ? ["-mno-red-zone", "-m64", "-mcmodel=small"] : ["-m32", "-march=i686"];
+  const allowed = x64 ? PC_RELATIVE : PC_RELATIVE_I686;
   const manifests = await readManifests(root);
   const lines: string[] = [];
   const blobs: Buffer[] = [];
@@ -76,10 +83,10 @@ export async function buildPackages(root: string, buildDir: string, exec: Exec):
     const objects: string[] = [];
     for (const source of sources) {
       const obj = path.join(buildDir, `pkg-${m.name}-${source.replace(/\.c$/, ".o")}`);
-      await exec("gcc", [...pkgCc, "-c", path.join(srcDir, source), "-o", obj], root);
+      await exec("gcc", [...pkgCc, ...archCc, "-c", path.join(srcDir, source), "-o", obj], root);
       const relocs = execFileSync("readelf", ["-rW", obj], { encoding: "utf8" });
-      for (const type of relocs.match(/R_X86_64_\w+/g) ?? []) {
-        if (!PC_RELATIVE.has(type)) {
+      for (const type of relocs.match(/R_(?:X86_64|386)_\w+/g) ?? []) {
+        if (!allowed.has(type)) {
           throw new Error(`package ${m.name}: ${source} needs ${type}; packages must be position-independent`);
         }
       }
@@ -89,7 +96,7 @@ export async function buildPackages(root: string, buildDir: string, exec: Exec):
     const bin = path.join(buildDir, `pkg-${m.name}.bin`);
     await exec(
       "ld",
-      ["-m", "elf_x86_64", "-nostdlib", "-static", "--no-warn-rwx-segments", "-e", "0",
+      ["-m", x64 ? "elf_x86_64" : "elf_i386", "-nostdlib", "-static", "--no-warn-rwx-segments", "-e", "0",
         "-T", path.join(root, "packages", "pkg.ld"), "-o", elf, ...objects],
       root,
     );

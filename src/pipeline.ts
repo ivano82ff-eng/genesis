@@ -1,6 +1,6 @@
 import { buildPackages } from "./packages.js";
 import { spawn, spawnSync } from "node:child_process";
-import { startGuest } from "./guest.js";
+import { pickQemu, startGuest } from "./guest.js";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,23 @@ const HOST_PACKAGES =
   "build-essential nasm qemu-system-x86 grub-pc-bin grub-common xorriso mtools";
 
 const MULTIBOOT2_MAGIC = 0xe85250d6;
+
+/** x86_64 (QEMU, the default) or i686 (32-bit, for v86 in the browser). */
+export type Arch = "x86_64" | "i686";
+
+/** GENESIS_ARCH=i686 switches build, QEMU and tests to the 32-bit target. */
+export function currentArch(): Arch {
+  const raw = process.env.GENESIS_ARCH ?? "x86_64";
+  if (raw !== "x86_64" && raw !== "i686") {
+    throw new Error(`GENESIS_ARCH: ${raw}; ждём x86_64 или i686`);
+  }
+  return raw;
+}
+
+/** build/ for x86_64 (as before), build/i686/ for the 32-bit image. */
+export function buildDirFor(arch: Arch): string {
+  return arch === "x86_64" ? path.join(repoRoot(), "build") : path.join(repoRoot(), "build", "i686");
+}
 
 export type ImagePaths = {
   elfPath: string;
@@ -97,14 +114,34 @@ export function assertMultiboot2Header(elf: Buffer): void {
   throw new Error("В ELF нет корректного заголовка Multiboot2 в первых 32 КиБ");
 }
 
-export async function buildImage(): Promise<ImagePaths> {
+export async function buildImage(arch: Arch = currentArch()): Promise<ImagePaths> {
   const missing = missingTools(["nasm", "gcc", "ld", "objcopy", "grub-mkrescue", "xorriso"]);
   if (missing.length > 0) {
     throw hostToolError(missing);
   }
 
   const root = repoRoot();
-  const buildDir = path.join(root, "build");
+  const buildDir = buildDirFor(arch);
+  const x64 = arch === "x86_64";
+  const nasmElf = x64 ? "-felf64" : "-felf32";
+  /* nasm flags every 32-bit cross-section reference; the linker resolves them. */
+  const nasmQuiet = x64 ? [] : ["-w-reloc-abs-dword", "-w-reloc-rel-dword"];
+  const ldEmu = x64 ? "elf_x86_64" : "elf_i386";
+  /* 64-bit sources in kernel/ and programs/; the i686 twins of the assembly live in */
+  /* kernel/i686/ and programs/i686/. All C is shared. */
+  const kasm = (name: string): string => path.join(root, "kernel", ...(x64 ? [] : ["i686"]), name);
+  const pasm = (name: string): string => path.join(root, "programs", ...(x64 ? [] : ["i686"]), name);
+  /* Blob sources incbin "build/..."; the i686 copies point at build/i686/. */
+  const blobSource = async (name: string): Promise<string> => {
+    const src = path.join(root, "kernel", name);
+    if (x64) {
+      return src;
+    }
+    const text = (await readFile(src, "utf8")).replaceAll('incbin "build/', 'incbin "build/i686/');
+    const out = path.join(buildDir, name);
+    await writeFile(out, text);
+    return out;
+  };
   const isoRoot = path.join(buildDir, "iso");
   const elfPath = path.join(buildDir, "kernel.elf");
   const isoPath = path.join(buildDir, "genesis.iso");
@@ -137,8 +174,7 @@ export async function buildImage(): Promise<ImagePaths> {
     "-fno-unwind-tables",
     "-mno-red-zone",
     "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=large",
+    ...(x64 ? ["-m64", "-mcmodel=large"] : ["-m32", "-march=i686"]),
     "-Os",
     "-Wall",
     "-Wextra",
@@ -160,8 +196,7 @@ export async function buildImage(): Promise<ImagePaths> {
     "-mno-red-zone",
     "-mgeneral-regs-only",
     "-fcf-protection=none",
-    "-m64",
-    "-mcmodel=small",
+    ...(x64 ? ["-m64", "-mcmodel=small"] : ["-m32", "-march=i686"]),
     "-Os",
     "-Wall",
     "-Wextra",
@@ -171,12 +206,12 @@ export async function buildImage(): Promise<ImagePaths> {
   const compileKernel = (source: string, output: string): Promise<void> =>
     exec("gcc", [...kernelCc, "-c", path.join(root, "kernel", source), "-o", output], root);
 
-  await exec("nasm", ["-fbin", path.join(root, "programs", "hello.asm"), "-o", helloBin], root);
-  await exec("nasm", ["-fbin", path.join(root, "programs", "ticker.asm"), "-o", path.join(buildDir, "ticker.bin")], root);
-  await exec("nasm", ["-fbin", path.join(root, "programs", "pulse.asm"), "-o", path.join(buildDir, "pulse.bin")], root);
-  await exec("nasm", ["-fbin", path.join(root, "programs", "crashy.asm"), "-o", path.join(buildDir, "crashy.bin")], root);
+  await exec("nasm", ["-fbin", pasm("hello.asm"), "-o", helloBin], root);
+  await exec("nasm", ["-fbin", pasm("ticker.asm"), "-o", path.join(buildDir, "ticker.bin")], root);
+  await exec("nasm", ["-fbin", pasm("pulse.asm"), "-o", path.join(buildDir, "pulse.bin")], root);
+  await exec("nasm", ["-fbin", pasm("crashy.asm"), "-o", path.join(buildDir, "crashy.bin")], root);
   const startObj = path.join(buildDir, "start.o");
-  await exec("nasm", ["-felf64", path.join(root, "programs", "start.s"), "-o", startObj], root);
+  await exec("nasm", [nasmElf, pasm("start.s"), "-o", startObj], root);
   await exec("gcc", [...progCc, "-c", path.join(root, "programs", "runtime.c"), "-o", runtimeObj], root);
   for (const name of ["open", "vtxt", "vdocx", "vimg", "vpdf", "vmp4"]) {
     const obj = path.join(buildDir, `${name}.o`);
@@ -187,7 +222,7 @@ export async function buildImage(): Promise<ImagePaths> {
       "ld",
       [
         "-m",
-        "elf_x86_64",
+        ldEmu,
         "-nostdlib",
         "--no-warn-rwx-segments",
         "-T",
@@ -203,31 +238,31 @@ export async function buildImage(): Promise<ImagePaths> {
     await exec("objcopy", ["-O", "binary", elf, bin], root);
   }
 
-  await buildPackages(root, buildDir, exec);
+  await buildPackages(root, buildDir, exec, arch);
 
   await exec("nasm", ["-fbin", path.join(root, "kernel", "mbr.asm"), "-o", mbrBin], root);
 
   await exec(
     "nasm",
-    ["-felf64", "-w+all", path.join(root, "kernel", "boot.asm"), "-o", bootObj],
+    [nasmElf, "-w+all", ...nasmQuiet, kasm("boot.asm"), "-o", bootObj],
     root,
   );
 
   await exec(
     "nasm",
-    ["-felf64", "-w+all", path.join(root, "kernel", "assets_blob.asm"), "-o", blobObj],
+    [nasmElf, "-w+all", ...nasmQuiet, await blobSource("assets_blob.asm"), "-o", blobObj],
     root,
   );
 
   await exec(
     "nasm",
-    ["-felf64", "-w+all", path.join(root, "kernel", "irq.asm"), "-o", irqObj],
+    [nasmElf, "-w+all", ...nasmQuiet, kasm("irq.asm"), "-o", irqObj],
     root,
   );
 
   await exec(
     "nasm",
-    ["-felf64", "-w+all", path.join(root, "kernel", "mbr_blob.asm"), "-o", mbrObj],
+    [nasmElf, "-w+all", ...nasmQuiet, await blobSource("mbr_blob.asm"), "-o", mbrObj],
     root,
   );
 
@@ -249,7 +284,7 @@ export async function buildImage(): Promise<ImagePaths> {
 
   await exec("ld", [
     "-m",
-    "elf_x86_64",
+    ldEmu,
     "-n",
     "-nostdlib",
     "-z",
@@ -322,7 +357,7 @@ export async function captureBootLog(timeoutMs: number): Promise<{
   serial: string;
   markerFound: boolean;
 }> {
-  const missing = missingTools(["qemu-system-x86_64"]);
+  const missing = missingTools([pickQemu("none")]);
   if (missing.length > 0) {
     throw hostToolError(missing);
   }

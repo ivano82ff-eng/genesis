@@ -1,5 +1,4 @@
 /* Packages are flat, position-independent binaries: one section from 0. */
-OUTPUT_FORMAT(elf64-x86-64)
 SECTIONS
 {
     . = 0;
@@ -9,6 +8,7 @@ SECTIONS
         *(.text) *(.text.*)
         *(.rodata) *(.rodata.*)
         *(.data) *(.data.*)
+        *(.got) *(.got.plt)
         *(.bss) *(.bss.*) *(COMMON)
         BYTE(0)
     }

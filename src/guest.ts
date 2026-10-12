@@ -169,15 +169,18 @@ export function pickQemu(display: DisplayMode): string {
   if (forced) {
     return forced;
   }
+  const i686 = process.env.GENESIS_ARCH === "i686";
+  const windows = i686 ? WINDOWS_QEMU.replace("x86_64", "i386") : WINDOWS_QEMU;
   if (
     display === "gtk" &&
     !process.env.DISPLAY &&
     !process.env.WAYLAND_DISPLAY &&
-    existsSync(WINDOWS_QEMU)
+    existsSync(windows)
   ) {
-    return WINDOWS_QEMU;
+    return windows;
   }
-  return "qemu-system-x86_64";
+  // GENESIS_ARCH=i686 boots the 32-bit (web) build the way v86 would: no long mode.
+  return i686 ? "qemu-system-i386" : "qemu-system-x86_64";
 }
 
 function toWindowsPath(p: string): string {
