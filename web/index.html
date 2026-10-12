@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0b0f1a">
 <title>genesis</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=__BUILD__">
 </head>
 <body>
 <div id="screen_container">
@@ -17,6 +17,7 @@
   <div class="core"></div>
   <div id="loading_text">Загрузка genesis…</div>
   <div id="loading_bar"><div></div></div>
+  <div id="loading_build">сборка __BUILD__</div>
   <div id="loading_hint">Система запускается внутри браузера, первый раз это занимает до минуты.</div>
 </div>
 
@@ -45,6 +46,6 @@
 <input id="typer" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Ввод текста">
 
 <script src="v86/libv86.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=__BUILD__"></script>
 </body>
 </html>

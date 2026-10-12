@@ -44,6 +44,8 @@ jobs:
         with:
           name: web-smoke
           path: build/web-smoke
+      - name: stamp the build id (cache busting)
+        run: sed -i "s/__BUILD__/${GITHUB_SHA::8}/g" web/index.html web/app.js
       - uses: actions/configure-pages@v5
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
       - uses: actions/upload-pages-artifact@v3
