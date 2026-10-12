@@ -2578,7 +2578,7 @@ static void execute(char *input) {
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         console_puts("tasks: run NAME [ARGS], spawn NAME, NAME &, ps, kill N\n");
         console_puts("memory: mem, heap, alloc N   system: tz [+H[:MM]], reboot, poweroff\n");
-        console_puts("desktop: desktop [WxH], pin DIR, unpin DIR, feed [all|files|editor|term|pkg|prog]\n");
+        console_puts("desktop: desktop [WxH], pin DIR, unpin DIR; desktop bar: feed [FILTER]\n");
         console_puts("net: net (ifconfig), net set IP MASK GW DNS, dhcp, ping HOST, dns NAME\n");
         console_puts("  http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
         console_puts("link: ping (no host: Genesis Link peer), say TEXT, send FILE\n");
