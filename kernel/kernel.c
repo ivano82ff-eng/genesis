@@ -33,9 +33,11 @@ void machine_reboot(void);
 void link_init(void);
 void link_poll(void);
 void clock_service(void);
+void clock_tz(const char *arg, char *out, unsigned int size);
 int link_up(void);
 int link_send_text(const char *text);
 int link_ping(void);
+int link_send_file(const char *name, const unsigned char *data, unsigned int length);
 void timer_start(void);
 int task_current(void);
 int task_spawn(const char *name, void *code);
@@ -397,6 +399,8 @@ static int kbd_alt;
 #define DESK_LEFT ((char)3)
 #define DESK_RIGHT ((char)4)
 #define DESK_ESC ((char)27)
+#define DESK_PGUP ((char)5)
+#define DESK_PGDN ((char)6)
 static int kbd_count;
 
 static void ps2_lock(unsigned long *flags) {
@@ -485,6 +489,45 @@ static void deliver(char ch) {
     }
 }
 
+/* Navigation-cluster keys (arrows, Home/End, PgUp/PgDn, Delete). They come
+ * E0-prefixed from a real keyboard, but some front-ends (QEMU's GTK UI on
+ * Windows) deliver them as bare keypad scancodes, so both paths land here. */
+static void nav_scancode(unsigned char b) {
+    if (editor_active()) {
+        int key = 0;
+        switch (b) {
+        case 0x48: key = ED_UP; break;
+        case 0x50: key = ED_DOWN; break;
+        case 0x4b: key = ED_LEFT; break;
+        case 0x4d: key = ED_RIGHT; break;
+        case 0x47: key = ED_HOME; break;
+        case 0x4f: key = ED_END; break;
+        case 0x49: key = ED_PGUP; break;
+        case 0x51: key = ED_PGDN; break;
+        case 0x53: key = ED_DELETE; break;
+        default: break;
+        }
+        if (key != 0) {
+            editor_key(key);
+        }
+        return;
+    }
+    /* On the desktop the arrows move history (up/down) and cell focus. */
+    if (desktop_active() && (b == 0x48 || b == 0x50 || b == 0x4b || b == 0x4d || b == 0x49 || b == 0x51)) {
+        desktop_key(b == 0x48   ? DESK_UP
+                    : b == 0x50 ? DESK_DOWN
+                    : b == 0x4b ? DESK_LEFT
+                    : b == 0x4d ? DESK_RIGHT
+                    : b == 0x49 ? DESK_PGUP
+                                : DESK_PGDN);
+        return;
+    }
+    /* Outside the editor: arrow up/down drive shell history. */
+    if ((b == 0x48 || b == 0x50) && !desktop_active()) {
+        shell_input(b == 0x48 ? KEY_UP : KEY_DOWN);
+    }
+}
+
 static void ps2_apply(void) {
     unsigned long flags;
     ps2_lock(&flags);
@@ -514,34 +557,7 @@ static void ps2_apply(void) {
                 }
                 continue;
             }
-            if (editor_active()) {
-                int key = 0;
-                switch (b) {
-                case 0x48: key = ED_UP; break;
-                case 0x50: key = ED_DOWN; break;
-                case 0x4b: key = ED_LEFT; break;
-                case 0x4d: key = ED_RIGHT; break;
-                case 0x47: key = ED_HOME; break;
-                case 0x4f: key = ED_END; break;
-                case 0x49: key = ED_PGUP; break;
-                case 0x51: key = ED_PGDN; break;
-                case 0x53: key = ED_DELETE; break;
-                default: break;
-                }
-                if (key != 0) {
-                    editor_key(key);
-                }
-                continue;
-            }
-            /* On the desktop the arrows move history (up/down) and cell focus. */
-            if (desktop_active() && (b == 0x48 || b == 0x50 || b == 0x4b || b == 0x4d)) {
-                desktop_key(b == 0x48 ? DESK_UP : b == 0x50 ? DESK_DOWN : b == 0x4b ? DESK_LEFT : DESK_RIGHT);
-                continue;
-            }
-            /* Outside the editor: arrow up/down drive shell history. */
-            if ((b == 0x48 || b == 0x50) && !desktop_active()) {
-                shell_input(b == 0x48 ? KEY_UP : KEY_DOWN);
-            }
+            nav_scancode(b);
             continue;
         }
         if (b == 0x2a || b == 0x36) {
@@ -587,6 +603,11 @@ static void ps2_apply(void) {
             continue;
         }
         if ((b & 0x80) != 0) {
+            continue;
+        }
+        if (b == 0x47 || b == 0x48 || b == 0x49 || b == 0x4b || b == 0x4d || b == 0x4f || b == 0x50 ||
+            b == 0x51 || b == 0x53) {
+            nav_scancode(b); /* keypad arrows without E0 */
             continue;
         }
         char ch = decode_set1(b, kbd_shift, kbd_caps);
@@ -1468,8 +1489,9 @@ static void cmd_ls(const char *arg) {
     console_puts("ls:");
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < FS_MAX; i++) {
-            if (!ramfs[i].used || ramfs[i].dir != (pass == 0) || !fs_in_dir(ramfs[i].name, abs)) {
-                continue;
+            if (!ramfs[i].used || ramfs[i].dir != (pass == 0) || !fs_in_dir(ramfs[i].name, abs) ||
+                base_name(ramfs[i].name)[0] == '.') {
+                continue; /* dot files (.journal, .pins) stay hidden */
             }
             console_putc(' ');
             console_puts(base_name(ramfs[i].name));
@@ -1755,6 +1777,44 @@ void cmd_pkg(const char *args);
 typedef void (*prog_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
 /* background: start the program as a task (`spawn NAME`) and return. */
+void desktop_link(const char *from, const char *to);
+void journal_add(char type, const char *what);
+
+/* A whole file arrived over Genesis Link: keep it in /home/inbox. */
+void link_file_received(const char *name, const unsigned char *data, unsigned int length) {
+    char abs[FS_NAME];
+    unsigned int n = 0;
+    for (const char *c = "/home/inbox/"; *c != 0; c++) {
+        abs[n++] = *c;
+    }
+    for (const char *c = name; *c != 0 && n + 1 < FS_NAME; c++) {
+        abs[n++] = *c;
+    }
+    abs[n] = 0;
+    if (!fs_is_dir_abs("/home/inbox")) {
+        fs_mkdir_abs("/home/inbox");
+    }
+    if (!fs_put_abs(abs, (const char *)data, length)) {
+        console_puts("inbox: cannot save\n");
+        return;
+    }
+    (void)disk_save();
+    console_puts("inbox: ");
+    console_puts(abs);
+    console_puts(" (");
+    print_u32(length);
+    console_puts(" bytes)\n");
+    journal_add('o', abs);
+    desktop_link("peer", "core");
+}
+
+static const char *run_prog; /* the foreground program, while it runs */
+
+/* pkg_sym resolved a library symbol: light the program -> library link. */
+void link_note(const char *lib) {
+    desktop_link(run_prog != 0 ? run_prog : "?", lib);
+}
+
 static void cmd_run(const char *name, int background) {
     struct ram_file *file = fs_find_prog(name);
     if (file == 0) {
@@ -1786,7 +1846,10 @@ static void cmd_run(const char *name, int background) {
     /* Programs are machine code run in ring 0: no isolation, a bad program
      * can hang the whole kernel. Fine for a demo, not a userspace. */
     prog_fn program = (prog_fn)(void *)dest;
+    run_prog = name;
+    desktop_link(name, "core"); /* a running program is tied to the core */
     program(console_puts, task_sleep, pkg_sym);
+    run_prog = 0;
     program_capture = 0;
     console_putc('\n');
 }
@@ -1966,8 +2029,182 @@ static void cmd_pin(const char *arg, int add) {
     console_putc('\n');
 }
 
+/* ---- Journal: every user action, for the «Лента» timeline ----
+ * /home/.journal holds one action per line: "HH:MM:SS<TAB>T<TAB>text",
+ * newest last, capped at JOURNAL_MAX lines. T is the action type:
+ * c command, o file opened, e file edited, s file saved, i pkg install,
+ * r pkg remove, p program run, k program stopped. */
+#define JOURNAL_FILE "/home/.journal"
+enum { JOURNAL_MAX = 40, JOURNAL_TEXT = 72 };
+static char j_time[JOURNAL_MAX][9];
+static char j_type[JOURNAL_MAX];
+static char j_text[JOURNAL_MAX][JOURNAL_TEXT];
+static int j_count = -1; /* -1: not loaded from disk yet */
+static int journal_quiet;  /* replaying a script: only the top line counts */
+
+void clock_now(char *hhmmss);
+
+static void journal_load(void) {
+    j_count = 0;
+    struct ram_file *f = fs_find_abs(JOURNAL_FILE);
+    if (f == 0) {
+        return;
+    }
+    unsigned int i = 0;
+    while (i < f->length && j_count < JOURNAL_MAX) {
+        unsigned int s = i;
+        while (i < f->length && f->data[i] != '\n') {
+            i++;
+        }
+        /* HH:MM:SS \t T \t text */
+        if (i - s >= 12 && f->data[s + 8] == '\t' && f->data[s + 10] == '\t') {
+            for (int k = 0; k < 8; k++) {
+                j_time[j_count][k] = (char)f->data[s + k];
+            }
+            j_time[j_count][8] = 0;
+            j_type[j_count] = (char)f->data[s + 9];
+            unsigned int n = 0;
+            for (unsigned int k = s + 11; k < i && n + 1 < JOURNAL_TEXT; k++) {
+                j_text[j_count][n++] = (char)f->data[k];
+            }
+            j_text[j_count][n] = 0;
+            j_count++;
+        }
+        i++;
+    }
+}
+
+static void journal_save(void) {
+    static char text[JOURNAL_MAX * (JOURNAL_TEXT + 12)];
+    unsigned int n = 0;
+    for (int e = 0; e < j_count; e++) {
+        for (int k = 0; k < 8; k++) {
+            text[n++] = j_time[e][k];
+        }
+        text[n++] = '\t';
+        text[n++] = j_type[e];
+        text[n++] = '\t';
+        for (const char *c = j_text[e]; *c != 0; c++) {
+            text[n++] = *c;
+        }
+        text[n++] = '\n';
+    }
+    /* The journal never takes the last free catalog slots from user files:
+     * with few left it stays in memory until there is room again. */
+    if (fs_find_abs(JOURNAL_FILE) == 0 && fs_free_slots() <= 8) {
+        return;
+    }
+    if (fs_put_abs(JOURNAL_FILE, text, n)) {
+        (void)disk_save();
+    }
+}
+
+void journal_add(char type, const char *what) {
+    if (journal_quiet || what == 0 || what[0] == 0) {
+        return;
+    }
+    if (j_count < 0) {
+        journal_load();
+    }
+    if (j_count == JOURNAL_MAX) {
+        for (int e = 1; e < JOURNAL_MAX; e++) {
+            for (int k = 0; k < 9; k++) {
+                j_time[e - 1][k] = j_time[e][k];
+            }
+            j_type[e - 1] = j_type[e];
+            for (int k = 0; k < JOURNAL_TEXT; k++) {
+                j_text[e - 1][k] = j_text[e][k];
+            }
+        }
+        j_count--;
+    }
+    clock_now(j_time[j_count]);
+    j_type[j_count] = type;
+    unsigned int n = 0;
+    while (what[n] != 0 && n + 1 < JOURNAL_TEXT) {
+        j_text[j_count][n] = what[n] == '\t' || what[n] == '\n' ? ' ' : what[n];
+        n++;
+    }
+    while (n > 0 && utf8_is_cont((unsigned char)what[n])) {
+        n--; /* never cut a UTF-8 character */
+    }
+    j_text[j_count][n] = 0;
+    j_count++;
+    journal_save();
+    /* Serial only: the screen and the desktop's captured output stay clean. */
+    char head[4] = {(char)type, ' ', 0, 0};
+    serial_puts("journal: ");
+    serial_puts(head);
+    serial_puts(j_text[j_count - 1]);
+    serial_puts("\n");
+}
+
+/* A typed command line: the type follows from its first word. */
+static void journal_command(const char *line) {
+    while (*line == ' ') {
+        line++;
+    }
+    char type = 'c';
+    if (starts_with(line, "pkg install ")) {
+        type = 'i';
+    } else if (starts_with(line, "pkg remove ")) {
+        type = 'r';
+    } else if (starts_with(line, "run ") || starts_with(line, "spawn ")) {
+        type = 'p';
+    } else if (starts_with(line, "kill ")) {
+        type = 'k';
+    } else if (starts_with(line, "edit ")) {
+        type = 'e';
+    } else if (starts_with(line, "cat ")) {
+        type = 'o';
+    }
+    journal_add(type, line);
+}
+
+int journal_count(void) {
+    if (j_count < 0) {
+        journal_load();
+    }
+    return j_count;
+}
+
+/* Entry i (0 = oldest): time, type and text. */
+int journal_get(int i, char *time, char *type, char *text, unsigned int cap) {
+    if (i < 0 || i >= journal_count()) {
+        return 0;
+    }
+    for (int k = 0; k < 9; k++) {
+        time[k] = j_time[i][k];
+    }
+    *type = j_type[i];
+    unsigned int n = 0;
+    while (j_text[i][n] != 0 && n + 1 < cap) {
+        text[n] = j_text[i][n];
+        n++;
+    }
+    text[n] = 0;
+    return 1;
+}
+
+extern unsigned char kernel_load_start[];
+extern unsigned char kernel_load_end[];
+
+/* Memory in use, in bytes: the loaded kernel (code, data, bss with the
+ * framebuffer back-buffers and task stacks) plus the heap. */
+unsigned long mem_used_bytes(void) {
+    return (unsigned long)(kernel_load_end - kernel_load_start) + heap_used;
+}
+
+/* Used share of the usable RAM from the Multiboot map, rounded up so that
+ * any use shows at least 1%. Falls back to the heap alone without a map. */
 int heap_percent(void) {
-    return (int)((unsigned long)heap_used * 100ul / HEAP_SIZE);
+    unsigned long total = usable_bytes;
+    unsigned long used = mem_used_bytes();
+    if (total == 0) {
+        total = HEAP_SIZE;
+        used = heap_used;
+    }
+    return (int)((used * 100ul + total - 1) / total);
 }
 
 unsigned int heap_used_kib(void) {
@@ -1996,7 +2233,7 @@ void kbd_toggle_layout(void) {
 static const char *const sh_words[] = {
     "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
     "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
-    "unpin", "poweroff", "reboot", "ping", "say", "sh", "set", "grep", "wc", "head",
+    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz",
 };
 
 static unsigned int cand_used;
@@ -2229,6 +2466,13 @@ static void execute(char *input) {
         cmd_pkg(input[3] == ' ' ? input + 4 : "");
         return;
     }
+    if (str_eq(input, "tz") || starts_with(input, "tz ")) {
+        char out[48];
+        clock_tz(input[2] == ' ' ? input + 3 : "", out, sizeof out);
+        console_puts(out);
+        console_putc('\n');
+        return;
+    }
     if (str_eq(input, "ps")) {
         cmd_ps();
         return;
@@ -2286,6 +2530,25 @@ static void execute(char *input) {
         }
         return;
     }
+    if (str_eq(input, "send") || starts_with(input, "send ")) {
+        /* send FILE: copy a file to the Genesis Link peer's /home/inbox. */
+        char abs[FS_NAME];
+        const char *arg = input[4] == ' ' ? input + 5 : "";
+        struct ram_file *f = arg[0] != 0 && fs_resolve(arg, abs) ? fs_find_abs(abs) : 0;
+        if (f == 0 || f->dir) {
+            console_puts("send: no such file\n");
+        } else if (!link_up()) {
+            console_puts("send: no link\n");
+        } else if (link_send_file(base_name(abs), (const unsigned char *)f->data, f->length)) {
+            console_puts("send: done ");
+            console_puts(abs);
+            console_putc('\n');
+            desktop_link("core", "peer");
+        } else {
+            console_puts("send: failed\n");
+        }
+        return;
+    }
     if (str_eq(input, "say") || starts_with(input, "say ")) {
         const char *text = input[3] == ' ' ? input + 4 : "";
         if (text[0] == 0 || !link_up() || !link_send_text(text)) {
@@ -2322,6 +2585,7 @@ void desktop_run(const char *cmd, char *out, unsigned int size) {
     desk_cap[0] = 0;
     desk_cap_on = 1;
     sh_run_line(copy);
+    journal_command(cmd);
     desk_cap_on = 0;
     unsigned int k = 0;
     while (k + 1 < size && desk_cap[k] != 0) {
@@ -2928,7 +3192,12 @@ static void shell_input(char ch) {
         for (int i = 0; i < LINE_MAX; i++) {
             copy[i] = line[i];
         }
+        char typed[LINE_MAX];
+        for (int i = 0; i < LINE_MAX; i++) {
+            typed[i] = line[i];
+        }
         sh_run_line(copy);
+        journal_command(typed);
         if (!editor_active()) {
             prompt();
         }

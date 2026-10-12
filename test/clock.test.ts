@@ -26,7 +26,7 @@ test(
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       const first = await guest.screendump();
-      await guest.waitForSerial("time 00:00:01", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("up 00:00:01", DEFAULT_TIMEOUT_MS);
       await delay(200);
       const second = await guest.screendump();
       const a = parsePpm(first);
@@ -34,7 +34,7 @@ test(
       assert.equal(a.width, b.width);
       assert.equal(a.height, b.height);
       assert.equal(a.pixels.equals(b.pixels), false);
-      assert.match(guest.serial, /time 00:00:01/);
+      assert.match(guest.serial, /up 00:00:01/);
     } finally {
       await guest.stop();
     }

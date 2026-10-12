@@ -1,16 +1,39 @@
-/** «Ядро» desktop coordinates at the default 1024x768 framebuffer. */
-export const CORE = { x: 300, y: 370 };
+/** «Ядро» desktop geometry at the default 1024x768 framebuffer. The core is
+ * centred above the command bar; with a panel docked on the right the ring
+ * slides left (core x = 300). Cells sit evenly on a ring, the first on top. */
+const SIN = Array.from({ length: 91 }, (_, d) => Math.round(Math.sin((d * Math.PI) / 180) * 1024));
+function isin(deg: number): number {
+  deg = ((deg % 360) + 360) % 360;
+  if (deg <= 90) return SIN[deg];
+  if (deg <= 180) return SIN[180 - deg];
+  return -isin(deg - 180);
+}
+const RING = 215;
+export function coreAt(docked = false): { x: number; y: number } {
+  return { x: docked ? 300 : 512, y: 370 };
+}
+/** Centre of cell i when n cells are shown. */
+export function cellAt(i: number, n = 7, docked = false): { x: number; y: number } {
+  const c = coreAt(docked);
+  const mirror = i * 2 > n;
+  const k = mirror ? n - i : i;
+  const deg = Math.trunc((k * 360 + Math.trunc(n / 2)) / n);
+  const dx = Math.trunc((isin(deg) * RING) / 1024);
+  const dy = -Math.trunc((isin(deg + 90) * RING) / 1024);
+  return { x: c.x + (mirror ? -dx : dx), y: c.y + dy };
+}
+export const CORE = coreAt();
 export const CELL = {
-  files: { x: 300, y: 155 },
-  editor: { x: 486, y: 262 },
-  terminal: { x: 486, y: 478 },
-  packages: { x: 300, y: 585 },
-  memory: { x: 114, y: 478 },
-  feed: { x: 114, y: 262 },
-  settings: { x: 408, y: 184 },
-  /** First program/pin cell, then the next one. */
-  extra1: { x: 515, y: 370 },
-  extra2: { x: 408, y: 556 },
+  files: cellAt(0),
+  editor: cellAt(1),
+  terminal: cellAt(2),
+  packages: cellAt(3),
+  memory: cellAt(4),
+  feed: cellAt(5),
+  settings: cellAt(6),
+  /** First program cell (8 cells, terminal docked), then a pin (9 cells). */
+  extra1: cellAt(7, 8, true),
+  extra2: cellAt(8, 9, true),
 };
 /** Close button of the docked panel. */
 export const CLOSE = { x: 976, y: 94 };

@@ -340,6 +340,8 @@ static void move_vertical(int lines) {
     }
 }
 
+void journal_add(char type, const char *what);
+
 static void save(void) {
     if (!fs_put(name, buf, len)) {
         note = "save failed";
@@ -355,6 +357,7 @@ static void save(void) {
     for (const char *s = " bytes)\n"; *s; s++) msg[k++] = *s;
     msg[k] = 0;
     console_puts(msg);
+    journal_add('s', name);
     dirty = 0;
     note = "saved";
 }

@@ -11,7 +11,7 @@ import {
   missingTools,
 } from "../src/pipeline.js";
 import { click, countOf, delay, pixel, typeLine } from "./helpers.js";
-import { CELL, CORE, stopButton } from "./ui.js";
+import { CELL, CORE, coreAt, stopButton } from "./ui.js";
 
 async function desktop(size = ""): Promise<Guest> {
   const missing = missingTools(["qemu-system-x86_64"]);
@@ -46,11 +46,15 @@ test("core counts tasks; spawn adds one, «стоп» and kill stop them", { tim
   const guest = await desktop();
   try {
     await guest.waitForSerial("core: mem ", DEFAULT_TIMEOUT_MS);
+    // Real memory use from the Multiboot map: never 0%.
+    assert.match(guest.serial, /core: mem ([1-9]\d*)% tasks 0/);
     await typeLine(guest, "spawn pulse");
-    await guest.waitForSerial("core: mem 0% tasks 1", DEFAULT_TIMEOUT_MS);
+    await guest.waitForSerial("% tasks 1", DEFAULT_TIMEOUT_MS);
+    assert.match(guest.serial, /core: mem [1-9]\d*% tasks 1/);
     await guest.waitForSerial("pulse\n", DEFAULT_TIMEOUT_MS);
     // Click the core: the task panel lists the shell and pulse.
-    await click(guest, CORE.x, CORE.y);
+    const dockedCore = coreAt(true); // the terminal panel docked: the ring slid left
+    await click(guest, dockedCore.x, dockedCore.y);
     await guest.waitForSerial("tasks: 0:shell 1:pulse", DEFAULT_TIMEOUT_MS);
     await delay(300);
     let zero = countOf(guest.serial, "tasks 0");
@@ -85,6 +89,7 @@ test("pkg install adds a program cell, pin adds a folder cell, both go away agai
     await delay(300);
     await click(guest, CELL.extra1.x, CELL.extra1.y);
     await guest.waitForSerial("HELLO GENESIS", DEFAULT_TIMEOUT_MS);
+    await delay(500);
     await typeLine(guest, "mkdir proj");
     await typeLine(guest, "pin proj");
     await guest.waitForSerial("cells: Файлы Редактор Терминал Пакеты Память Лента Настройки strdemo /home/proj\n", DEFAULT_TIMEOUT_MS);
@@ -115,9 +120,9 @@ test("command bar: hints, Tab completion, history, runs commands and edit", { ti
     await key(guest, "tab");
     await typeLine(guest, "list");
     await guest.waitForSerial("genesis:/home> pkg list\n", DEFAULT_TIMEOUT_MS);
-    // Up recalls the last line.
+    // PgUp recalls the last line (Up/Down on an empty bar move focus).
     const lists = countOf(guest.serial, "genesis:/home> pkg list\n");
-    await key(guest, "up");
+    await key(guest, "pgup");
     await key(guest, "ret");
     await next(guest, "genesis:/home> pkg list\n", lists);
     // bar `edit` opens the full-screen editor; Esc returns home.
@@ -244,6 +249,59 @@ test("portrait 480x800: core on top, honeycomb below, panel is a full sheet", { 
     assert.ok(edgeL[2] > 120 && edgeR[2] > 120, "лист не во всю ширину");
     const homes = countOf(guest.serial, "home: ready");
     await click(guest, 70, 80);
+    await next(guest, "home: ready", homes);
+  } finally {
+    await guest.stop();
+  }
+});
+
+test("arrows: Left/Right move focus with E0 and bare keypad scancodes; Up with history doesn't steal focus", { timeout: 120_000 }, async () => {
+  const guest = await desktop();
+  try {
+    // Some history first: Up/Down on an empty bar must still move focus.
+    await typeLine(guest, "echo a");
+    await guest.waitForSerial("\na\n", DEFAULT_TIMEOUT_MS);
+    // Real E0-prefixed arrows (QMP 'left'/'right').
+    let cores = countOf(guest.serial, "focus: Ядро");
+    await key(guest, "left");
+    await next(guest, "focus: Ядро", cores);
+    const before = countOf(guest.serial, "focus: ");
+    await key(guest, "right");
+    await next(guest, "focus: ", before);
+    assert.ok(!guest.serial.trimEnd().endsWith("focus: Ядро"), "Right не сдвинул фокус с ядра");
+    cores = countOf(guest.serial, "focus: Ядро");
+    await key(guest, "left");
+    await next(guest, "focus: Ядро", cores);
+    await key(guest, "up");
+    await guest.waitForSerial("focus: Файлы", DEFAULT_TIMEOUT_MS);
+    // Bare keypad scancodes (no E0), as QEMU's GTK UI on Windows may send.
+    cores = countOf(guest.serial, "focus: Ядро");
+    await key(guest, "kp_2");
+    await next(guest, "focus: Ядро", cores);
+    const n = countOf(guest.serial, "focus: ");
+    await key(guest, "kp_6");
+    await next(guest, "focus: ", n);
+    const m = countOf(guest.serial, "focus: ");
+    await key(guest, "kp_4");
+    await next(guest, "focus: ", m);
+  } finally {
+    await guest.stop();
+  }
+});
+
+test("panel opened by mouse: arrows work at once inside it", { timeout: 120_000 }, async () => {
+  const guest = await desktop();
+  try {
+    await click(guest, CELL.files.x, CELL.files.y);
+    await guest.waitForSerial("ls: readme", DEFAULT_TIMEOUT_MS);
+    await key(guest, "down");
+    await guest.waitForSerial("focus: item 2", DEFAULT_TIMEOUT_MS);
+    await key(guest, "up");
+    await guest.waitForSerial("focus: item 1", DEFAULT_TIMEOUT_MS);
+    await key(guest, "ret");
+    await guest.waitForSerial("dir: / ls: bin/ lib/ docs/ home/", DEFAULT_TIMEOUT_MS);
+    const homes = countOf(guest.serial, "home: ready");
+    await key(guest, "esc");
     await next(guest, "home: ready", homes);
   } finally {
     await guest.stop();

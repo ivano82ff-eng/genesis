@@ -1,6 +1,6 @@
 /* Genesis Link: a private frame inside an Ethernet carrier. */
 
-enum { GL_PING = 1, GL_PONG = 2, GL_TEXT = 3, GL_MAX = 128, ETH_TYPE_HI = 0x88, ETH_TYPE_LO = 0xb5 };
+enum { GL_PING = 1, GL_PONG = 2, GL_TEXT = 3, GL_FILE = 4, GL_CHUNK = 5, GL_DONE = 6, GL_ACK = 7, GL_MAX = 128, ETH_TYPE_HI = 0x88, ETH_TYPE_LO = 0xb5 };
 
 static inline void outb(unsigned short port, unsigned char value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -38,6 +38,43 @@ static unsigned char mac[6];
 static int link_ready;
 static int pong_seen;
 static int reply_pong;
+/* The other end of the link, learnt from any good frame it sends. */
+static unsigned char peer_mac[6];
+static int peer_known;
+/* File transfer (GL_FILE header, GL_CHUNK pieces, GL_DONE; each one is
+ * acknowledged with GL_ACK + its offset so a slow receiver never drops). */
+enum { XFER_MAX = 65536, CHUNK = 112 };
+static unsigned char rx_file[XFER_MAX];
+static char rx_name[64];
+static unsigned int rx_total, rx_sum, rx_got;
+static int rx_active;
+static int ack_pending;
+static unsigned int ack_offset;
+static int ack_seen;
+static unsigned int ack_seen_offset;
+void link_file_received(const char *name, const unsigned char *data, unsigned int length);
+
+static unsigned int le32(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static void put32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+/* Fletcher-style checksum over the whole file. */
+static unsigned int file_sum(const unsigned char *data, unsigned int length) {
+    unsigned int a = 1;
+    unsigned int b = 0;
+    for (unsigned int i = 0; i < length; i++) {
+        a = (a + data[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
 
 static unsigned int pci_read(unsigned slot, unsigned offset) {
     unsigned int addr = 0x80000000u | (slot << 11) | (offset & 0xfcu);
@@ -153,6 +190,74 @@ static void link_take(const unsigned char *frame, unsigned int length) {
         return;
     }
     unsigned char type = frame[17];
+    if (!peer_known) {
+        static const char hex[] = "0123456789abcdef";
+        char text[24];
+        unsigned int n = 0;
+        for (int i = 0; i < 6; i++) {
+            peer_mac[i] = frame[6 + i];
+            text[n++] = hex[frame[6 + i] >> 4];
+            text[n++] = hex[frame[6 + i] & 15];
+            if (i < 5) {
+                text[n++] = ':';
+            }
+        }
+        text[n] = 0;
+        peer_known = 1;
+        console_puts("link: peer ");
+        console_puts(text);
+        console_putc('\n');
+    }
+    const unsigned char *pl = frame + 22;
+    if (type == GL_ACK && payload_len >= 4) {
+        ack_seen = 1;
+        ack_seen_offset = le32(pl);
+        return;
+    }
+    if (type == GL_FILE && payload_len >= 9) {
+        rx_total = le32(pl);
+        rx_sum = le32(pl + 4);
+        unsigned int n = 0;
+        for (unsigned int i = 8; i < payload_len && n + 1 < sizeof rx_name; i++) {
+            char ch = (char)pl[i];
+            if (ch == '/' || ch < 32) {
+                ch = '_';
+            }
+            rx_name[n++] = ch;
+        }
+        rx_name[n] = 0;
+        rx_got = 0;
+        rx_active = rx_total <= XFER_MAX && n > 0;
+        ack_pending = 1;
+        ack_offset = 0xffffffffu;
+        return;
+    }
+    if (type == GL_CHUNK && payload_len >= 4) {
+        unsigned int off = le32(pl);
+        unsigned int n = payload_len - 4;
+        if (rx_active && off == rx_got && off + n <= rx_total) {
+            for (unsigned int i = 0; i < n; i++) {
+                rx_file[off + i] = pl[4 + i];
+            }
+            rx_got += n;
+        }
+        ack_pending = 1;
+        ack_offset = off; /* re-sent chunks are acknowledged again */
+        return;
+    }
+    if (type == GL_DONE) {
+        if (rx_active) {
+            rx_active = 0;
+            if (rx_got == rx_total && file_sum(rx_file, rx_total) == rx_sum) {
+                link_file_received(rx_name, rx_file, rx_total);
+            } else {
+                console_puts("link: file damaged, dropped\n");
+            }
+        }
+        ack_pending = 1;
+        ack_offset = 0xfffffffeu;
+        return;
+    }
     if (type == GL_PING) {
         reply_pong = 1;
         return;
@@ -210,6 +315,12 @@ void link_poll(void) {
     if (reply_pong) {
         reply_pong = 0;
         link_send(GL_PONG, 0, 0);
+    }
+    if (ack_pending) {
+        unsigned char p[4];
+        ack_pending = 0;
+        put32(p, ack_offset);
+        link_send(GL_ACK, p, 4);
     }
 }
 
@@ -287,4 +398,74 @@ void link_init(void) {
     outb(io_base + 0x37, 0x0c);
     link_ready = 1;
     console_puts("link: up\n");
+}
+
+/* Send one frame and wait for its acknowledgement (offset `want`). */
+static int send_acked(unsigned char type, const unsigned char *payload, unsigned int length, unsigned int want) {
+    for (int attempt = 0; attempt < 8; attempt++) {
+        ack_seen = 0;
+        if (!link_send(type, payload, length)) {
+            return 0;
+        }
+        for (int i = 0; i < 400000; i++) {
+            link_poll();
+            if (ack_seen && ack_seen_offset == want) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Genesis Link file transfer: header, chunks, done; every frame acked. */
+int link_send_file(const char *name, const unsigned char *data, unsigned int length) {
+    if (!link_ready || length > XFER_MAX) {
+        return 0;
+    }
+    unsigned char p[GL_MAX];
+    put32(p, length);
+    put32(p + 4, file_sum(data, length));
+    unsigned int n = 8;
+    for (unsigned int i = 0; name[i] != 0 && n < GL_MAX; i++) {
+        p[n++] = (unsigned char)name[i];
+    }
+    if (!send_acked(GL_FILE, p, n, 0xffffffffu)) {
+        return 0;
+    }
+    for (unsigned int off = 0; off < length; off += CHUNK) {
+        unsigned int k = length - off < CHUNK ? length - off : CHUNK;
+        put32(p, off);
+        for (unsigned int i = 0; i < k; i++) {
+            p[4 + i] = data[off + i];
+        }
+        if (!send_acked(GL_CHUNK, p, 4 + k, off)) {
+            return 0;
+        }
+    }
+    return send_acked(GL_DONE, 0, 0, 0xfffffffeu);
+}
+
+/* The peer's MAC as text, or 0 if no peer has been seen. */
+int link_peer(char *out) {
+    if (!peer_known) {
+        return 0;
+    }
+    static const char hex[] = "0123456789abcdef";
+    unsigned int n = 0;
+    for (int i = 0; i < 6; i++) {
+        out[n++] = hex[peer_mac[i] >> 4];
+        out[n++] = hex[peer_mac[i] & 15];
+        if (i < 5) {
+            out[n++] = ':';
+        }
+    }
+    out[n] = 0;
+    return 1;
+}
+
+/* Say hello without waiting: a peer that answers shows up on the desktop. */
+void link_hello(void) {
+    if (link_ready) {
+        link_send(GL_PING, 0, 0);
+    }
 }
