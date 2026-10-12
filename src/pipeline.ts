@@ -162,6 +162,7 @@ export async function buildImage(arch: Arch = currentArch()): Promise<ImagePaths
   const pkgObj = path.join(buildDir, "pkg.o");
   const ccObj = path.join(buildDir, "cc.o");
   const netObj = path.join(buildDir, "net.o");
+  const browserObj = path.join(buildDir, "browser.o");
   const mbrBin = path.join(buildDir, "mbr.bin");
   const mbrObj = path.join(buildDir, "mbr_blob.o");
   const runtimeObj = path.join(buildDir, "runtime.o");
@@ -287,6 +288,7 @@ export async function buildImage(arch: Arch = currentArch()): Promise<ImagePaths
   await compileKernel("cc.c", ccObj);
 
   await compileKernel("net.c", netObj);
+  await compileKernel("browser.c", browserObj);
 
   await exec("ld", [
     "-m",
@@ -314,6 +316,7 @@ export async function buildImage(arch: Arch = currentArch()): Promise<ImagePaths
     pkgObj,
     ccObj,
     netObj,
+    browserObj,
     mbrObj,
     blobObj,
   ], root);

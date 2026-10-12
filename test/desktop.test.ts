@@ -44,7 +44,7 @@ test(
       assert.match(guest.serial, new RegExp(BOOT_MARKER));
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      assert.match(guest.serial, /cells: Файлы Редактор Терминал Пакеты Память Лента Настройки\n/);
+      assert.match(guest.serial, /cells: Файлы Редактор Терминал Пакеты Память Лента Настройки Браузер\n/);
       assert.match(guest.serial, /core: mem \d+% tasks 0/);
       assert.equal(guest.serial.includes("Назад"), false);
 

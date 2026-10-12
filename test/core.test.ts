@@ -84,7 +84,7 @@ test("pkg install adds a program cell, pin adds a folder cell, both go away agai
   const guest = await desktop();
   try {
     await typeLine(guest, "pkg install strdemo");
-    await guest.waitForSerial("cells: Файлы Редактор Терминал Пакеты Память Лента Настройки strdemo\n", DEFAULT_TIMEOUT_MS);
+    await guest.waitForSerial("cells: Файлы Редактор Терминал Пакеты Память Лента Настройки Браузер strdemo\n", DEFAULT_TIMEOUT_MS);
     // The new cell runs the program; output lands in the terminal panel.
     await delay(300);
     await click(guest, CELL.extra1.x, CELL.extra1.y);
@@ -92,16 +92,16 @@ test("pkg install adds a program cell, pin adds a folder cell, both go away agai
     await delay(500);
     await typeLine(guest, "mkdir proj");
     await typeLine(guest, "pin proj");
-    await guest.waitForSerial("cells: Файлы Редактор Терминал Пакеты Память Лента Настройки strdemo /home/proj\n", DEFAULT_TIMEOUT_MS);
+    await guest.waitForSerial("cells: Файлы Редактор Терминал Пакеты Память Лента Настройки Браузер strdemo /home/proj\n", DEFAULT_TIMEOUT_MS);
     await delay(300);
     await click(guest, CELL.extra2.x, CELL.extra2.y);
     await guest.waitForSerial("ls: \n", DEFAULT_TIMEOUT_MS);
     await key(guest, "esc");
-    const plain = countOf(guest.serial, "cells: Файлы Редактор Терминал Пакеты Память Лента Настройки\n");
+    const plain = countOf(guest.serial, "cells: Файлы Редактор Терминал Пакеты Память Лента Настройки Браузер\n");
     await typeLine(guest, "unpin proj");
     await typeLine(guest, "pkg remove strdemo");
     await guest.waitForSerial("pkg: removed strdemo", DEFAULT_TIMEOUT_MS);
-    await next(guest, "cells: Файлы Редактор Терминал Пакеты Память Лента Настройки\n", plain);
+    await next(guest, "cells: Файлы Редактор Терминал Пакеты Память Лента Настройки Браузер\n", plain);
   } finally {
     await guest.stop();
   }

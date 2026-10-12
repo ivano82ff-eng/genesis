@@ -33,6 +33,8 @@ void machine_reboot(void);
 void link_init(void);
 void link_poll(void);
 int net_command(const char *line);
+int web_command(const char *line);
+int layout_command(const char *line);
 void clock_service(void);
 void clock_tz(const char *arg, char *out, unsigned int size);
 int link_up(void);
@@ -1424,6 +1426,10 @@ extern const unsigned char sample_note_pdf_end[];
 extern const unsigned char sample_clip_mp4[];
 extern const unsigned char sample_clip_mp4_end[];
 
+extern const char web_page_index[];
+extern const unsigned int web_page_index_len;
+extern const char web_page_net[];
+extern const unsigned int web_page_net_len;
 extern const char cc_sample_hello[];
 extern const char cc_sample_fib[];
 extern const unsigned int cc_sample_hello_len;
@@ -1469,6 +1475,10 @@ static void fs_seed(void) {
                  (const unsigned char *)cc_sample_hello + cc_sample_hello_len);
     fs_seed_blob("/docs/fib.c", (const unsigned char *)cc_sample_fib,
                  (const unsigned char *)cc_sample_fib + cc_sample_fib_len);
+    fs_seed_blob("/docs/index.html", (const unsigned char *)web_page_index,
+                 (const unsigned char *)web_page_index + web_page_index_len);
+    fs_seed_blob("/docs/web.html", (const unsigned char *)web_page_net,
+                 (const unsigned char *)web_page_net + web_page_net_len);
 }
 
 /* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
@@ -2144,6 +2154,11 @@ int pins_get(int index, char *out, unsigned int cap) {
     return 0;
 }
 
+static void cmd_pin(const char *arg, int add);
+void shell_pin(const char *path, int add) {
+    cmd_pin(path, add);
+}
+
 static void cmd_pin(const char *arg, int add) {
     char abs[FS_NAME];
     while (*arg == ' ') {
@@ -2409,7 +2424,7 @@ void kbd_toggle_layout(void) {
 static const char *const sh_words[] = {
     "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
     "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
-    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc", "net", "ifconfig", "dhcp", "dns", "http", "nc", "udp",
+    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc", "net", "ifconfig", "dhcp", "dns", "http", "nc", "udp", "browse", "web", "layout",
 };
 
 static unsigned int cand_used;
@@ -2562,6 +2577,8 @@ static void execute(char *input) {
         console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
         console_puts("net: net, dhcp, ping HOST, dns NAME, http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
         console_puts("C: cc FILE.c or run FILE.c  (cc /docs/hello.c, cc /docs/fib.c)\n");
+        console_puts("web: browse URL (/docs/index.html, http://..., about:home), web back|reload|follow N\n");
+        console_puts("cells: layout list | move NAME POS | add NAME | remove NAME | reset | edit\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -2704,6 +2721,9 @@ static void execute(char *input) {
     }
     if (str_eq(input, "reboot")) {
         machine_reboot();
+        return;
+    }
+    if (web_command(input) || layout_command(input)) {
         return;
     }
     if (net_command(input)) {

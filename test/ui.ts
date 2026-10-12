@@ -13,7 +13,7 @@ export function coreAt(docked = false): { x: number; y: number } {
   return { x: docked ? 300 : 512, y: 370 };
 }
 /** Centre of cell i when n cells are shown. */
-export function cellAt(i: number, n = 7, docked = false): { x: number; y: number } {
+export function cellAt(i: number, n = 8, docked = false): { x: number; y: number } {
   const c = coreAt(docked);
   const mirror = i * 2 > n;
   const k = mirror ? n - i : i;
@@ -31,9 +31,10 @@ export const CELL = {
   memory: cellAt(4),
   feed: cellAt(5),
   settings: cellAt(6),
-  /** First program cell (8 cells, terminal docked), then a pin (9 cells). */
-  extra1: cellAt(7, 8, true),
-  extra2: cellAt(8, 9, true),
+  browser: cellAt(7),
+  /** First program cell (9 cells, terminal docked), then a pin (10 cells). */
+  extra1: cellAt(8, 9, true),
+  extra2: cellAt(9, 10, true),
 };
 /** Close button of the docked panel. */
 export const CLOSE = { x: 976, y: 94 };
