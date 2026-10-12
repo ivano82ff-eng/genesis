@@ -279,7 +279,7 @@ enum {
     CELL = 0x000d1a36u, CELL_HI = 0x00183260u, CORE_FILL = 0x00091530u,
     MUTED = 0x007d93b8u, WHITE = 0x00e8f4ffu, PANEL = 0x000c1830u, PANEL_BAR = 0x00132a50u,
 };
-enum { CELL_MAX = 12, CELL_CORE = 100 };
+enum { CELL_MAX = 12, CELL_CORE = 100, CELL_PEER = 101 };
 /* Layout, computed from the framebuffer size by layout_init(). U is the UI
  * scale in 1/256 (256 at 1024x768); P() scales a 1024x768 design length. */
 static int U = 256;
@@ -305,6 +305,8 @@ static int min_i(int a, int b) {
 }
 
 static void layout_cells(void);
+static int docked; /* landscape: a panel is docked on the right */
+static int wide;   /* landscape: the panel is a full-width sheet (Лента) */
 
 static void layout_init(void) {
     portrait = FB_H > FB_W;
@@ -340,14 +342,21 @@ static void layout_init(void) {
         CLOSE_W = P(48);
         CLOSE_X = PANEL_X + PANEL_W - CLOSE_W - P(8);
         int avail = (BAR_Y - top) / 2;
-        CORE_X = (PANEL_X + P(4)) / 2;
+        /* Centred above the command bar; with a panel docked on the right the
+         * whole ring slides into the free space on the left. */
+        CORE_X = docked ? (PANEL_X + P(4)) / 2 : FB_W / 2;
         CORE_Y = top + avail;
         CORE_R = avail * 112 / 314;
         CELL_R = avail * 52 / 314;
         if (ts(1) >= 2) {
             /* TV (1080p): labels are 2x for the sofa, so cells grow to hold them. */
-            CELL_R = avail * 58 / 314;
+            CELL_R = avail * 74 / 314;
         }
+    }
+    if (!portrait && wide) {
+        PANEL_X = P(16);
+        PANEL_W = FB_W - 2 * PANEL_X;
+        CLOSE_X = PANEL_X + PANEL_W - CLOSE_W - P(8);
     }
     CLOSE_Y = PANEL_Y + P(6);
     CLOSE_H = TITLE_H - P(12);
@@ -355,7 +364,9 @@ static void layout_init(void) {
 }
 enum { P_NONE = 0, P_FILES, P_TERM, P_PKG, P_MEM, P_FEED, P_SET, P_TASKS };
 enum { K_FILES = 0, K_EDITOR, K_TERM, K_PKG, K_MEM, K_FEED, K_SET, K_APP, K_PIN };
-enum { DESK_UP = 1, DESK_DOWN = 2, DESK_LEFT = 3, DESK_RIGHT = 4, DESK_ESC = 27 };
+static void open_feed(int filter);
+static int s_starts(const char *s, const char *prefix);
+enum { DESK_UP = 1, DESK_DOWN = 2, DESK_LEFT = 3, DESK_RIGHT = 4, DESK_PGUP = 5, DESK_PGDN = 6, DESK_ESC = 27 };
 
 extern int pkg_info(int index, char *name, unsigned int cap, int *installed, int *app);
 extern int pins_get(int index, char *out, unsigned int cap);
@@ -374,13 +385,13 @@ extern int editor_open(const char *file);
 extern const unsigned short *editor_screen(void);
 extern void editor_cursor(int *row, int *col);
 void desktop_run(const char *cmd, char *out, unsigned int size);
+void journal_add(char type, const char *what);
+int journal_count(void);
+int link_peer(char *out);
+void link_hello(void);
+int journal_get(int i, char *time, char *type, char *text, unsigned int cap);
 
-/* Pointy-top ring: 12 slots, 30 degrees apart, 215 px from the core. */
-static const short slot_dx[CELL_MAX] = {0, 108, 186, 215, 186, 108, 0, -108, -186, -215, -186, -108};
-static const short slot_dy[CELL_MAX] = {-215, -186, -108, 0, 108, 186, 215, 186, 108, 0, -108, -186};
-/* Cell i sits in slot slot_of[i]: the fixed cells spread around the ring
- * first, programs and pins fill the gaps between them. */
-static const unsigned char slot_of[CELL_MAX] = {0, 2, 4, 6, 8, 10, 1, 3, 5, 7, 9, 11};
+
 
 static const unsigned char ICONS[9][8] = {
     {0x00, 0x70, 0x88, 0xff, 0x81, 0x81, 0x81, 0xff}, /* files: folder */
@@ -423,6 +434,30 @@ static int utf8_chars(const char *s) {
         }
     }
     return n;
+}
+
+/* Cut s to at most max characters, adding "..." when it was longer. */
+static void utf8_clip(char *s, int max) {
+    int chars = 0;
+    for (unsigned int k = 0; s[k] != 0; k++) {
+        if (!utf8_is_cont((unsigned char)s[k]) && ++chars > max) {
+            if (max > 3) {
+                unsigned int j = k;
+                for (int back = 0; back < 2 && j > 0; back++) {
+                    j--;
+                    while (j > 0 && utf8_is_cont((unsigned char)s[j])) {
+                        j--;
+                    }
+                }
+                s[j] = '.';
+                s[j + 1] = '.';
+                s[j + 2] = 0;
+            } else {
+                s[k] = 0;
+            }
+            return;
+        }
+    }
 }
 
 static void s_copy(char *d, const char *s, unsigned int cap) {
@@ -636,6 +671,7 @@ static int rebuild_cells(void) {
     if (focus >= cell_count && focus != CELL_CORE) {
         focus = -1;
     }
+    layout_cells();
     if (s_eq(line, cells_line)) {
         return 0;
     }
@@ -645,12 +681,38 @@ static int rebuild_cells(void) {
     return 1;
 }
 
+static const short sin_tab[91] = {0,18,36,54,71,89,107,125,143,160,178,195,213,230,248,265,282,299,316,333,350,367,384,400,416,433,449,465,481,496,512,527,543,558,573,587,602,616,630,644,658,672,685,698,711,724,737,749,761,773,784,796,807,818,828,839,849,859,868,878,887,896,904,912,920,928,935,943,949,956,962,968,974,979,984,989,994,998,1002,1005,1008,1011,1014,1016,1018,1020,1022,1023,1023,1024,1024};
+
+/* sin(deg) * 1024 for any integer degree. */
+static int isin(int deg) {
+    deg %= 360;
+    if (deg < 0) {
+        deg += 360;
+    }
+    if (deg <= 90) {
+        return sin_tab[deg];
+    }
+    if (deg <= 180) {
+        return sin_tab[180 - deg];
+    }
+    return -isin(deg - 180);
+}
+
 static void layout_cells(void) {
     if (!portrait) {
+        /* Cells evenly on a ring around the core, the first one straight up;
+         * cell i and cell n-i are exact mirror images. */
         int ring = (BAR_Y - P(56)) / 2 * 215 / 314;
+        int n = cell_count > 0 ? cell_count : 1;
         for (int i = 0; i < CELL_MAX; i++) {
-            cell_cx[i] = CORE_X + slot_dx[slot_of[i]] * ring / 215;
-            cell_cy[i] = CORE_Y + slot_dy[slot_of[i]] * ring / 215;
+            int k = i < n ? i : n - 1;
+            int mirror = k * 2 > n;
+            int kk = mirror ? n - k : k;
+            int deg = (kk * 360 + n / 2) / n;
+            int dx = isin(deg) * ring / 1024;
+            int dy = -isin(deg + 90) * ring / 1024;
+            cell_cx[i] = CORE_X + (mirror ? -dx : dx);
+            cell_cy[i] = CORE_Y + dy;
         }
         return;
     }
@@ -673,7 +735,14 @@ static int highlighted(void) {
     return hint >= 0 ? hint : focus;
 }
 
+static int sheet_open(void) {
+    return panel != P_NONE && (portrait || wide);
+}
+
 static void draw_cell(int i) {
+    if (sheet_open()) {
+        return;
+    }
     if (i < 0 || i >= cell_count) {
         return;
     }
@@ -696,13 +765,61 @@ static void draw_cell(int i) {
     hex_fill(cx, cy, CELL_R, line);
     hex_fill(cx, cy, CELL_R - 3, inside);
     blit_rows(cx - 4 * ts(3), cy - CELL_R * 30 / 52, ICONS[c->kind], line, ts(3));
-    text_c(cx, cy + CELL_R * 6 / 52, c->label, WHITE, 1);
-    if (c->kind == K_FEED) {
-        text_c(cx, cy + CELL_R * 6 / 52 + 8 * ts(1) + P(4), "скоро", MUTED, 1);
+    {
+        /* Shrink the label until it fits inside the hexagon. */
+        int room = CELL_R * 887 / 512 - 8;
+        int sc = ts(1);
+        while (sc > 1 && utf8_chars(c->label) * (8 * sc + 2) - 2 > room) {
+            sc--;
+        }
+        int w = utf8_chars(c->label) * (8 * sc + 2) - 2;
+        text(cx - w / 2, cy + CELL_R * 6 / 52, c->label, WHITE, sc);
     }
 }
 
+/* ---- the Genesis Link peer: a second, smaller core ---- */
+static char peer_text[24];
+static int send_mode; /* Files panel picks a file to send to the peer */
+
+static int peer_r(void) {
+    return CORE_R * 45 / 100;
+}
+
+static void peer_pos(int *x, int *y) {
+    if (portrait) {
+        *x = FB_W - peer_r() - P(14);
+        *y = CORE_Y - CORE_R / 2;
+    } else {
+        *x = P(24) + peer_r();
+        *y = P(76) + peer_r();
+    }
+}
+
+static int highlighted(void);
+
+static void draw_peer(void) {
+    if (peer_text[0] == 0 || sheet_open()) {
+        return;
+    }
+    int x, y;
+    peer_pos(&x, &y);
+    int r = peer_r();
+    int on = highlighted() == CELL_PEER;
+    hex_fill(x, y, r + 6, on ? AMBER_MID : AMBER_FAINT);
+    hex_fill(x, y, r + 2, on ? YELLOW : AMBER);
+    hex_fill(x, y, r - 2, on ? CELL_HI : CORE_FILL);
+    text_c(x, y - 8 * ts(1) - P(4), "СОСЕД", AMBER, 1);
+    text_c(x, y + P(4), peer_text + 9, WHITE, 1); /* the last three MAC bytes */
+}
+
 static int cell_at(int x, int y) {
+    if (peer_text[0] != 0) {
+        int px, py;
+        peer_pos(&px, &py);
+        if ((x - px) * (x - px) + (y - py) * (y - py) < peer_r() * peer_r()) {
+            return CELL_PEER;
+        }
+    }
     int dx = x - CORE_X;
     int dy = y - CORE_Y;
     if (dx * dx + dy * dy < (CORE_R - P(8)) * (CORE_R - P(8))) {
@@ -730,6 +847,9 @@ static void core_bar(int y, int percent, unsigned int line, unsigned int fillc) 
 }
 
 static void draw_core(void) {
+    if (sheet_open()) {
+        return;
+    }
     int warn = core_mem >= 85;
     int pulse = core_tasks > 0 && core_phase;
     unsigned int line = warn ? RED : CYAN;
@@ -788,10 +908,26 @@ static int core_sample(void) {
 }
 
 /* ---- top line ---- */
+void clock_now(char *out);
+
+/* The clock beside «Назад» in full-screen viewers; HH:MM on narrow phones. */
+static void viewer_clock(void) {
+    int full = FB_W - 13 * 18 - 24 > BACK_X + BACK_W + 12;
+    int x = full ? FB_W - 13 * 18 - 24 : FB_W - 5 * 18 - 16;
+    char t[16];
+    unsigned int n = 0;
+    for (const char *c = full ? clock_text : clock_text + 5; *c != 0 && n < (full ? 13u : 5u); c++) {
+        t[n++] = *c;
+    }
+    t[n] = 0;
+    fill(x, 28, (int)n * 18, 16, BG);
+    text(x, 28, t, INK, 2);
+}
+
 static void draw_clock_chip(void) {
+    clock_now(clock_text + 5);
     if (view == VIEW_VIEWER) {
-        fill(620, 28, 13 * 16, 16, BG);
-        text(620, 28, clock_text, INK, 2);
+        viewer_clock();
         return;
     }
     int x = FB_W - P(98) - 8 * CHAR_W;
@@ -967,7 +1103,7 @@ static void draw_bar(void) {
 /* ---- panel ---- */
 static const char *panel_title(void) {
     switch (panel) {
-    case P_FILES: return "Файлы";
+    case P_FILES: return send_mode ? "Отправить файл" : "Файлы";
     case P_TERM: return "Терминал";
     case P_PKG: return "Пакеты";
     case P_MEM: return "Память";
@@ -984,7 +1120,8 @@ static int pkg_row_count;
 
 /* Everything in the panel that can be clicked, tapped or picked with the
  * arrows + Enter (TV remote) is an item; the same code runs either way. */
-enum { A_CLOSE = 0, A_ROW, A_UP, A_DOWN, A_PKG, A_LAYOUT, A_REBOOT, A_POWEROFF, A_KILL };
+enum { A_CLOSE = 0, A_ROW, A_UP, A_DOWN, A_PKG, A_LAYOUT, A_REBOOT, A_POWEROFF, A_KILL, A_CHIP, A_CARD, A_FEED_PREV,
+       A_FEED_NEXT, A_TO_FEED };
 enum { ITEM_MAX = 32 };
 static int it_n;
 static int it_x[ITEM_MAX], it_y[ITEM_MAX], it_w[ITEM_MAX], it_h[ITEM_MAX], it_act[ITEM_MAX], it_arg[ITEM_MAX];
@@ -1002,6 +1139,211 @@ static void item(int x, int y, int w, int h, int act, int arg) {
     it_act[it_n] = act;
     it_arg[it_n] = arg;
     it_n++;
+}
+
+/* ---- «Лента»: the journal as a timeline ----
+ * Chips filter by kind; cards sit on a line (horizontal in landscape,
+ * vertical on a phone) that ends at a glowing «Сейчас» marker. */
+enum { F_ALL = 0, F_FILES, F_EDITOR, F_TERM, F_PKG, F_PROG, F_COUNT };
+static const char *const feed_chip[F_COUNT] = {"Все", "Файлы", "Редактор", "Терминал", "Пакеты", "Программы"};
+enum { FEED_MAX = 40 };
+static int feed_filter;
+static int feed_ids[FEED_MAX]; /* journal indexes passing the filter, oldest first */
+static int feed_n;
+static int feed_first;   /* first visible card */
+static int feed_confirm = -1; /* journal index waiting for a second Enter */
+
+static int feed_match(char type, int filter) {
+    switch (filter) {
+    case F_FILES: return type == 'o';
+    case F_EDITOR: return type == 'e' || type == 's';
+    case F_TERM: return type == 'c';
+    case F_PKG: return type == 'i' || type == 'r';
+    case F_PROG: return type == 'p' || type == 'k';
+    default: return 1;
+    }
+}
+
+static const char *feed_type_name(char type) {
+    switch (type) {
+    case 'o': return "открыт";
+    case 'e': return "правка";
+    case 's': return "сохранён";
+    case 'i': return "установка";
+    case 'r': return "удаление";
+    case 'p': return "запуск";
+    case 'k': return "остановка";
+    default: return "команда";
+    }
+}
+
+static int feed_visible(void);
+
+static void feed_collect(void) {
+    feed_n = 0;
+    char time[9];
+    char type;
+    char text[80];
+    for (int i = 0; journal_get(i, time, &type, text, sizeof text) && feed_n < FEED_MAX; i++) {
+        if (feed_match(type, feed_filter)) {
+            feed_ids[feed_n++] = i;
+        }
+    }
+    int vis = feed_visible();
+    if (feed_first > feed_n - vis) {
+        feed_first = feed_n - vis;
+    }
+    if (feed_first < 0) {
+        feed_first = 0;
+    }
+}
+
+#define FEED_CHIP_H (8 * ts(1) + P(18))
+#define FEED_CARD_W (portrait ? PANEL_W - P(72) : P(208))
+#define FEED_CARD_H (portrait ? 2 * (8 * ts(1)) + 8 * ts(2) + P(30) : 2 * (8 * ts(1)) + 8 * ts(2) + P(40))
+#define FEED_GAP P(14)
+
+static int feed_line_top(void) {
+    int below_chips = BODY_Y + 2 * (FEED_CHIP_H + P(8)) + P(10);
+    if (portrait) {
+        return below_chips;
+    }
+    /* Landscape: the cards and the line sit in the middle of the sheet. */
+    int mid = PANEL_Y + PANEL_H / 2 - FEED_CARD_H;
+    return mid > below_chips ? mid : below_chips;
+}
+
+/* How many cards fit along the line. */
+static int feed_visible(void) {
+    int along = portrait ? PANEL_Y + PANEL_H - P(60) - feed_line_top() : PANEL_W - P(32) - 2 * P(44) - P(70);
+    int step = portrait ? FEED_CARD_H + FEED_GAP : FEED_CARD_W + FEED_GAP;
+    int n = along / step;
+    return n < 1 ? 1 : n;
+}
+
+static void feed_say(void) {
+    char s[160];
+    unsigned int n = s_cat(s, 0, "feed: ", sizeof s);
+    n = s_cat(s, n, feed_chip[feed_filter], sizeof s);
+    n = s_cat(s, n, " ", sizeof s);
+    n = u_cat(s, n, (unsigned int)feed_n, sizeof s);
+    s_cat(s, n, "\n", sizeof s);
+    console_puts(s);
+}
+
+static void draw_feed(int x0, int y0, int inner_w) {
+    (void)inner_w;
+    int t1 = 8 * ts(1);
+    int t2 = 8 * ts(2);
+    /* Chips: two rows on a phone, one row otherwise. */
+    int cx = x0;
+    int cy = y0;
+    for (int f = 0; f < F_COUNT; f++) {
+        int w = utf8_chars(feed_chip[f]) * (t1 + 2) + P(24);
+        if (cx + w > PANEL_X + PANEL_W - P(16)) {
+            cx = x0;
+            cy += FEED_CHIP_H + P(8);
+        }
+        int on = f == feed_filter;
+        frame_rect(cx, cy, w, FEED_CHIP_H, on ? AMBER : CYAN_DIM, on ? AMBER_DIM : CELL);
+        ui_text(cx + P(12), cy + (FEED_CHIP_H - t1) / 2, feed_chip[f], on ? WHITE : MUTED, 1);
+        item(cx, cy, w, FEED_CHIP_H, A_CHIP, f);
+        cx += w + P(8);
+    }
+    int vis = feed_visible();
+    int top = feed_line_top();
+    char time[9];
+    char type;
+    char text[80];
+    if (feed_n == 0) {
+        ui_text(x0, top + P(20), "Пока пусто: выполните команду,", MUTED, 1);
+        ui_text(x0, top + P(26) + t1, "откройте или сохраните файл.", MUTED, 1);
+    }
+    if (portrait) {
+        int lx = PANEL_X + P(30);
+        int bottom = PANEL_Y + PANEL_H - P(56);
+        fill(lx - 1, top, 3, bottom - top, CYAN_DIM);
+        for (int k = 0; k < vis && feed_first + k < feed_n; k++) {
+            int id = feed_ids[feed_first + k];
+            journal_get(id, time, &type, text, sizeof text);
+            int y = top + k * (FEED_CARD_H + FEED_GAP);
+            int x = lx + P(26);
+            fill(lx - P(5), y + FEED_CARD_H / 2 - P(5), P(11), P(11), type == 'c' ? CYAN : AMBER);
+            frame_rect(x, y, FEED_CARD_W, FEED_CARD_H, id == feed_confirm ? RED : CYAN_MID, CELL);
+            time[5] = 0;
+            ui_text(x + P(10), y + P(8), time, MUTED, 1);
+            ui_text(x + P(10) + 6 * (t1 + 2), y + P(8), feed_type_name(type), type == 'c' ? CYAN : AMBER, 1);
+            int max_chars = (FEED_CARD_W - P(20)) / (t2 + 2);
+            char clip[80];
+            s_copy(clip, text, sizeof clip);
+            utf8_clip(clip, max_chars);
+            ui_text(x + P(10), y + P(14) + t1, id == feed_confirm ? "Enter: повторить?" : clip, WHITE, 2);
+            item(x, y, FEED_CARD_W, FEED_CARD_H, A_CARD, feed_first + k);
+        }
+        /* «Сейчас»: a glowing bar under the newest card. */
+        int ny = top + (feed_n - feed_first < vis ? feed_n - feed_first : vis) * (FEED_CARD_H + FEED_GAP);
+        if (feed_first + vis >= feed_n) {
+            fill(PANEL_X + P(10), ny - P(2), PANEL_W - P(20), P(7), AMBER_DIM);
+            fill(PANEL_X + P(10), ny, PANEL_W - P(20), P(3), YELLOW);
+            ui_text(PANEL_X + P(16), ny + P(8), "Сейчас", YELLOW, 1);
+        }
+        int bw = P(120);
+        if (feed_first > 0) {
+            button(PANEL_X + P(16), bottom + P(4), bw, P(44), "Выше", CYAN_MID, CELL);
+            item(PANEL_X + P(16), bottom + P(4), bw, P(44), A_FEED_PREV, 0);
+        }
+        if (feed_first + vis < feed_n) {
+            button(PANEL_X + PANEL_W - bw - P(16), bottom + P(4), bw, P(44), "Ниже", CYAN_MID, CELL);
+            item(PANEL_X + PANEL_W - bw - P(16), bottom + P(4), bw, P(44), A_FEED_NEXT, 0);
+        }
+        return;
+    }
+    int ly = top + FEED_CARD_H + P(40);
+    int left = PANEL_X + P(16) + P(44);
+    fill(PANEL_X + P(16), ly - 1, PANEL_W - P(32), 3, CYAN_DIM);
+    int k = 0;
+    for (; k < vis && feed_first + k < feed_n; k++) {
+        int id = feed_ids[feed_first + k];
+        journal_get(id, time, &type, text, sizeof text);
+        int x = left + k * (FEED_CARD_W + FEED_GAP);
+        unsigned int dot = type == 'c' ? CYAN : AMBER;
+        fill(x + FEED_CARD_W / 2 - 1, top + FEED_CARD_H, 3, ly - top - FEED_CARD_H, CYAN_DIM);
+        fill(x + FEED_CARD_W / 2 - P(6), ly - P(6), P(13), P(13), dot);
+        frame_rect(x, top, FEED_CARD_W, FEED_CARD_H, id == feed_confirm ? RED : CYAN_MID, CELL);
+        ui_text(x + P(10), top + P(10), time, MUTED, 1);
+        ui_text(x + P(10), top + P(16) + t1, feed_type_name(type), dot, 1);
+        int big = utf8_chars(text) * (t2 + 2) <= FEED_CARD_W - P(20);
+        int max_chars = (FEED_CARD_W - P(20)) / ((big ? t2 : t1) + 2);
+        char clip[80];
+        s_copy(clip, text, sizeof clip);
+        utf8_clip(clip, max_chars);
+        ui_text(x + P(10), top + P(24) + 2 * t1, id == feed_confirm ? "Повторить?" : clip, WHITE, big ? 2 : 1);
+        item(x, top, FEED_CARD_W, FEED_CARD_H, A_CARD, feed_first + k);
+        time[5] = 0;
+        ui_text(x + FEED_CARD_W / 2 - 2 * (t1 + 2), ly + P(14), time, MUTED, 1);
+    }
+    if (feed_first + vis >= feed_n) {
+        /* «Сейчас»: a glowing vertical marker after the newest card. */
+        int nx = left + k * (FEED_CARD_W + FEED_GAP) + P(10);
+        fill(nx - P(4), top - P(6), P(11), ly - top + P(30), AMBER_DIM);
+        fill(nx - 1, top - P(6), P(3), ly - top + P(30), YELLOW);
+        ui_text(nx + P(10), ly - P(30), "Сейчас", YELLOW, 1);
+    }
+    int bh = FEED_CARD_H;
+    if (feed_first > 0) {
+        button(PANEL_X + P(16), top, P(36), bh, "<", CYAN_MID, CELL);
+        item(PANEL_X + P(16), top, P(36), bh, A_FEED_PREV, 0);
+    }
+    if (feed_first + vis < feed_n) {
+        int bx = PANEL_X + PANEL_W - P(16) - P(36);
+        button(bx, top, P(36), bh, ">", CYAN_MID, CELL);
+        item(bx, top, P(36), bh, A_FEED_NEXT, 0);
+    }
+    if (feed_confirm >= 0) {
+        ui_text(x0, ly + P(44) + t1, "Опасная команда: Enter ещё раз — выполнить, Esc — отмена", RED, 1);
+    } else {
+        ui_text(x0, ly + P(44) + t1, "Стрелки — по ленте, Enter — открыть снова или повторить", MUTED, 1);
+    }
 }
 
 static void draw_panel_body(void) {
@@ -1155,19 +1497,7 @@ static void draw_panel_body(void) {
         return;
     }
     if (panel == P_FEED) {
-        ui_text(x0, y0, "Скоро: линия времени ваших", WHITE, 1);
-        ui_text(x0, y0 + t1 + P(6), "действий (вторая фаза).", WHITE, 1);
-        ui_text(x0, y0 + 2 * (t1 + P(6)) + P(10), "Недавние команды:", MUTED, 1);
-        int row_h = t2 + P(16);
-        for (int i = 0; i < bar_hist_n; i++) {
-            int top = y0 + 3 * (t1 + P(6)) + P(16) + i * (row_h + P(4));
-            if (top + row_h > PANEL_Y + PANEL_H - P(8)) {
-                break;
-            }
-            fill(PANEL_X + P(8), top, PANEL_W - P(16), row_h, CELL);
-            fill(PANEL_X + P(18), top + row_h / 2 - P(4), P(8), P(8), AMBER);
-            ui_text(x0 + P(22), top + P(8), bar_hist[bar_hist_n - 1 - i], WHITE, 2);
-        }
+        draw_feed(x0, y0, inner_w);
         return;
     }
     if (panel == P_SET) {
@@ -1253,6 +1583,14 @@ static void draw_panel(void) {
         text_c(CLOSE_X + CLOSE_W / 2, CLOSE_Y + (CLOSE_H - 8 * ts(2)) / 2, "X", WHITE, 2);
     }
     draw_panel_body();
+    if (panel != P_FEED) {
+        /* «В ленту»: this panel's history on the timeline (tap / D-pad path). */
+        int fw = utf8_chars("В ленту") * (8 * ts(1) + 2) + P(20);
+        int fx = portrait ? PANEL_X + PANEL_W - fw - P(8) : CLOSE_X - fw - P(8);
+        frame_rect(fx, CLOSE_Y, fw, CLOSE_H, AMBER_MID, CELL);
+        ui_text(fx + P(10), CLOSE_Y + (CLOSE_H - 8 * ts(1)) / 2, "В ленту", AMBER, 1);
+        item(fx, CLOSE_Y, fw, CLOSE_H, A_TO_FEED, 0);
+    }
     if (pfocus >= it_n) {
         pfocus = it_n - 1;
     }
@@ -1261,9 +1599,97 @@ static void draw_panel(void) {
     }
 }
 
+/* ---- links: program -> library / core, glowing for a moment ---- */
+enum { LINK_MAX = 6, LINK_SECONDS = 2 };
+static char link_from[LINK_MAX][FS_NAME];
+static char link_to[LINK_MAX][FS_NAME];
+static int link_n;
+static int link_age; /* seconds the current links have been shown */
+
+static int cell_named(const char *name) {
+    for (int i = 0; i < cell_count; i++) {
+        if (cells[i].kind == K_APP && s_eq(cells[i].arg, name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void link_end(const char *name, int *x, int *y) {
+    if (s_eq(name, "peer")) {
+        peer_pos(x, y);
+        return;
+    }
+    if (s_eq(name, "core")) {
+        *x = CORE_X;
+        *y = CORE_Y;
+        return;
+    }
+    int c = cell_named(name);
+    if (c < 0) {
+        c = K_PKG; /* libraries have no cell: the Пакеты cell stands in */
+    }
+    *x = cell_cx[c];
+    *y = cell_cy[c];
+}
+
+static void glow_line(int x0, int y0, int x1, int y1) {
+    int dx = x1 - x0;
+    int dy = y1 - y0;
+    int steps = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+    if (steps == 0) {
+        return;
+    }
+    for (int k = 0; k <= steps; k++) {
+        int x = x0 + dx * k / steps;
+        int y = y0 + dy * k / steps;
+        fill(x - 2, y - 2, 5, 5, AMBER_DIM);
+    }
+    for (int k = 0; k <= steps; k++) {
+        fill(x0 + dx * k / steps - 1, y0 + dy * k / steps - 1, 2, 2, YELLOW);
+    }
+}
+
+static void draw_links(void) {
+    if (sheet_open()) {
+        return;
+    }
+    for (int i = 0; i < link_n; i++) {
+        int x0, y0, x1, y1;
+        link_end(link_from[i], &x0, &y0);
+        link_end(link_to[i], &x1, &y1);
+        if (x0 != x1 || y0 != y1) {
+            glow_line(x0, y0, x1, y1);
+        }
+    }
+}
+
+void desktop_link(const char *from, const char *to) {
+    for (int i = 0; i < link_n; i++) {
+        if (s_eq(link_from[i], from) && s_eq(link_to[i], to)) {
+            link_age = 0;
+            return;
+        }
+    }
+    console_puts("link: ");
+    console_puts(from);
+    console_puts(" -> ");
+    console_puts(to);
+    console_putc('\n');
+    if (link_n == LINK_MAX) {
+        return;
+    }
+    s_copy(link_from[link_n], from, FS_NAME);
+    s_copy(link_to[link_n], to, FS_NAME);
+    link_n++;
+    link_age = 0;
+}
+
 static void draw_home_ui(void) {
     bg_fill(0, 0, FB_W, FB_H);
     draw_top();
+    draw_links();
+    draw_peer();
     draw_core();
     for (int i = 0; i < cell_count; i++) {
         draw_cell(i);
@@ -1285,7 +1711,9 @@ static void redraw_panel(void) {
 }
 
 static void redraw_mark(int i) {
-    if (i == CELL_CORE) {
+    if (i == CELL_PEER) {
+        draw_peer();
+    } else if (i == CELL_CORE) {
         draw_core();
     } else if (i >= 0) {
         draw_cell(i);
@@ -1425,7 +1853,7 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
     cursor_forget();
     fill(0, 0, FB_W, FB_H, BG);
     draw_back();
-    text(620, 28, clock_text, INK, 2);
+    viewer_clock();
     struct genesis_api api;
     api.puts = api_puts;
     api.text = api_text;
@@ -1439,6 +1867,8 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
     api.yield = api_yield;
     api.malloc = api_malloc;
     api.free = api_free;
+    api.width = FB_W;
+    api.height = FB_H;
     viewer_entry entry = (viewer_entry)(void *)PROG_LOAD_ADDR;
     {
         unsigned long stack_top = 0x900000ul + 512ul * 1024ul;
@@ -1457,20 +1887,36 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
 }
 
 
+static void set_mode(int dock, int wide_sheet) {
+    if (docked != dock || wide != wide_sheet) {
+        docked = dock;
+        wide = wide_sheet;
+        layout_init();
+    }
+}
+
+static void set_docked(int on) {
+    set_mode(on, on ? wide : 0);
+}
+
 static void show_home(void) {
     view = VIEW_HOME;
     panel = P_NONE;
+    send_mode = 0;
+    set_docked(0);
     pfocus = -1;
     mouse_arm();
     rebuild_cells();
     redraw_all();
+    link_hello(); /* a Genesis Link peer that answers appears as a small core */
     console_puts("home: ready\n");
 }
 
 static void open_panel(int which) {
     view = VIEW_HOME;
     panel = which;
-    pfocus = pfocus_pending ? 1 : -1;
+    set_mode(1, which == P_FEED);
+    pfocus = 1; /* arrows work at once: focus starts on the first row */
     mouse_arm();
     redraw_all();
     say_back();
@@ -1534,6 +1980,19 @@ static void bar_exec(const char *cmd, int show_term) {
         show_home();
         return;
     }
+    if (s_eq(cmd, "feed") || s_starts(cmd, "feed ")) {
+        /* `feed [all|files|editor|term|pkg|prog]` opens Лента on the desktop. */
+        static const char *const names[F_COUNT] = {"all", "files", "editor", "term", "pkg", "prog"};
+        int f = F_ALL;
+        for (int i = 0; i < F_COUNT; i++) {
+            if (s_eq(cmd + (cmd[4] == ' ' ? 5 : 4), names[i])) {
+                f = i;
+            }
+        }
+        bar_out[0] = 0;
+        open_feed(f);
+        return;
+    }
     if (s_eq(cmd, "clear")) {
         term_len = 0;
         term[0] = 0;
@@ -1562,7 +2021,11 @@ static void bar_exec(const char *cmd, int show_term) {
     rebuild_cells();
     core_sample();
     if (show_term && out[0] != 0) {
+        if (panel != P_TERM) {
+            pfocus = -1; /* command output: the arrows stay with the cells */
+        }
         panel = P_TERM;
+        set_docked(1);
     }
     if (panel == P_FILES) {
         collect_files();
@@ -1571,6 +2034,13 @@ static void bar_exec(const char *cmd, int show_term) {
 }
 
 static void open_cell(int i) {
+    if (i == CELL_PEER) {
+        /* «Отправить файл»: pick a file in /home, it goes to the peer. */
+        send_mode = 1;
+        open_files("/home");
+        console_puts("send: pick a file\n");
+        return;
+    }
     if (i == CELL_CORE) {
         open_tasks();
         return;
@@ -1592,7 +2062,7 @@ static void open_cell(int i) {
         console_putc('\n');
         break;
     }
-    case K_FEED: open_panel(P_FEED); break;
+    case K_FEED: open_feed(0); break;
     case K_SET: open_panel(P_SET); break;
     case K_APP: {
         char cmd[FS_NAME + 8];
@@ -1649,8 +2119,141 @@ static void show_file(int row) {
     if (!fs_lookup(path, &bytes, &length)) {
         return;
     }
+    if (send_mode) {
+        char cmd[FS_NAME + 8];
+        s_cat(cmd, s_cat(cmd, 0, "send ", sizeof cmd), path, sizeof cmd);
+        send_mode = 0;
+        bar_exec(cmd, 1);
+        return;
+    }
+    journal_add('o', path);
     const char *viewer = viewer_for_name(row_name[row]);
     launch_viewer(viewer, bytes, length, row_name[row]);
+}
+
+static int s_starts(const char *s, const char *prefix) {
+    while (*prefix != 0) {
+        if (*s++ != *prefix++) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void open_feed(int filter) {
+    feed_filter = filter;
+    feed_confirm = -1;
+    feed_first = 1 << 20; /* start at «Сейчас» */
+    feed_collect();
+    open_panel(P_FEED);
+    feed_collect(); /* again: the sheet is wider than a docked panel */
+    redraw_panel();
+    /* Focus the newest card (or the first chip when the feed is empty). */
+    pfocus = 1;
+    for (int k = 0; k < it_n; k++) {
+        if (it_act[k] == A_CARD) {
+            pfocus = k;
+        }
+    }
+    redraw_panel();
+    feed_say();
+}
+
+/* The Лента filter that fits the panel (or cell) you came from. */
+static int feed_filter_for_panel(int which) {
+    switch (which) {
+    case P_FILES: return F_FILES;
+    case P_TERM: return F_TERM;
+    case P_PKG: return F_PKG;
+    case P_TASKS: return F_PROG;
+    default: return F_ALL;
+    }
+}
+
+static int destructive(const char *cmd) {
+    return s_starts(cmd, "rm ") || s_starts(cmd, "rmdir ") || s_starts(cmd, "mv ") ||
+           s_starts(cmd, "pkg remove ") || s_starts(cmd, "kill ") || s_starts(cmd, "write ") ||
+           s_starts(cmd, "poweroff") || s_starts(cmd, "reboot") || s_starts(cmd, "unpin ");
+}
+
+static void bar_exec(const char *cmd, int show_term);
+
+/* Enter on a card: open the file again or run the command again. */
+static void feed_replay(int pos) {
+    if (pos < 0 || pos >= feed_n) {
+        return;
+    }
+    int id = feed_ids[pos];
+    char time[9];
+    char type;
+    char text[80];
+    if (!journal_get(id, time, &type, text, sizeof text)) {
+        return;
+    }
+    if (destructive(text) && feed_confirm != id) {
+        feed_confirm = id;
+        console_puts("feed: confirm ");
+        console_puts(text);
+        console_putc('\n');
+        redraw_panel();
+        return;
+    }
+    feed_confirm = -1;
+    console_puts("feed: replay ");
+    console_puts(text);
+    console_putc('\n');
+    char cmd[96];
+    if ((type == 'o' || type == 's') && text[0] == '/') {
+        const unsigned char *bytes = 0;
+        unsigned int length = 0;
+        if (type == 'o' && fs_lookup(text, &bytes, &length)) {
+            const char *base = text;
+            for (const char *c = text; *c != 0; c++) {
+                if (*c == '/') {
+                    base = c + 1;
+                }
+            }
+            journal_add('o', text);
+            launch_viewer(viewer_for_name(base), bytes, length, base);
+            return;
+        }
+        unsigned int n = s_cat(cmd, 0, "edit ", sizeof cmd);
+        s_cat(cmd, n, text, sizeof cmd);
+    } else {
+        s_copy(cmd, text, sizeof cmd);
+    }
+    bar_exec(cmd, 1);
+}
+
+/* Serial trace of the focused card, for tests and debugging. */
+static void feed_at(void) {
+    if (panel != P_FEED || pfocus < 0 || pfocus >= it_n || it_act[pfocus] != A_CARD) {
+        return;
+    }
+    char time[9];
+    char type;
+    char text[80];
+    if (journal_get(feed_ids[it_arg[pfocus]], time, &type, text, sizeof text)) {
+        console_puts("feed: at ");
+        console_puts(text);
+        console_putc('\n');
+    }
+}
+
+static void feed_scroll(int step) {
+    int vis = feed_visible();
+    int before = feed_first;
+    feed_first += step;
+    if (feed_first > feed_n - vis) {
+        feed_first = feed_n - vis;
+    }
+    if (feed_first < 0) {
+        feed_first = 0;
+    }
+    if (feed_first != before) {
+        feed_confirm = -1;
+        redraw_panel();
+    }
 }
 
 static void panel_act(int k) {
@@ -1662,6 +2265,31 @@ static void panel_act(int k) {
     }
     if (act == A_ROW) {
         show_file(arg);
+        return;
+    }
+    if (act == A_CHIP) {
+        feed_filter = arg;
+        feed_confirm = -1;
+        feed_first = 1 << 20;
+        feed_collect();
+        mouse_arm();
+        redraw_panel();
+        feed_say();
+        return;
+    }
+    if (act == A_CARD) {
+        feed_replay(arg);
+        mouse_arm();
+        return;
+    }
+    if (act == A_FEED_PREV || act == A_FEED_NEXT) {
+        feed_scroll(act == A_FEED_PREV ? -1 : 1);
+        mouse_arm();
+        return;
+    }
+    if (act == A_TO_FEED) {
+        open_feed(feed_filter_for_panel(panel));
+        mouse_arm();
         return;
     }
     if (act == A_UP || act == A_DOWN) {
@@ -1744,6 +2372,8 @@ static int nearest(int n, const int *xs, const int *ys, int from, int dx, int dy
     return best;
 }
 
+static void home_nav(int dx, int dy);
+
 static void panel_nav(int dx, int dy) {
     int xs[ITEM_MAX];
     int ys[ITEM_MAX];
@@ -1756,6 +2386,31 @@ static void panel_nav(int dx, int dy) {
         next = it_n > 1 ? 1 : 0;
     } else {
         next = nearest(it_n, xs, ys, pfocus, dx, dy);
+        int along = portrait ? dy : dx;
+        if (panel == P_FEED && it_act[pfocus] == A_CARD && along != 0) {
+            /* Along the timeline: the neighbouring card, sliding at the ends. */
+            int want = it_arg[pfocus] + along;
+            next = -1;
+            for (int k = 0; k < it_n; k++) {
+                if (it_act[k] == A_CARD && it_arg[k] == want) {
+                    next = k;
+                }
+            }
+            if (next < 0) {
+                if (want >= 0 && want < feed_n) {
+                    feed_scroll(along);
+                    console_puts("feed: scroll\n");
+                    for (int k = 0; k < it_n; k++) {
+                        if (it_act[k] == A_CARD && it_arg[k] == want) {
+                            pfocus = k;
+                        }
+                    }
+                    redraw_panel();
+                    feed_at();
+                }
+                return;
+            }
+        }
         if (next < 0 && dy != 0 && panel == P_FILES) {
             /* Past the last visible row: scroll the list. */
             if (dy > 0 && file_top + FROW_VIS < file_rows) {
@@ -1769,12 +2424,23 @@ static void panel_nav(int dx, int dy) {
             }
             return;
         }
+        if (next < 0 && !sheet_open() && (dx < 0 || (dy != 0 && it_n <= 2))) {
+            /* Left past the panel's edge: back out to the cells. */
+            pfocus = -1;
+            redraw_panel();
+            home_nav(dx, dy);
+            return;
+        }
         if (next < 0) {
             return;
         }
     }
     pfocus = next;
+    if (focus >= 0) {
+        set_highlight(hint, -1);
+    }
     redraw_panel();
+    feed_at();
     console_puts("focus: item ");
     char s[12];
     u_cat(s, 0, (unsigned int)pfocus, sizeof s);
@@ -1874,31 +2540,42 @@ static void bar_set(const char *s) {
 
 static void focus_say(int f) {
     console_puts("focus: ");
-    console_puts(f == CELL_CORE ? "Ядро" : cells[f].label);
+    console_puts(f == CELL_CORE ? "Ядро" : f == CELL_PEER ? "Сосед" : cells[f].label);
     console_putc('\n');
 }
 
 /* Arrow keys on the home screen: move to the nearest cell (or the core). */
 static void home_nav(int dx, int dy) {
-    int xs[CELL_MAX + 1];
-    int ys[CELL_MAX + 1];
+    int xs[CELL_MAX + 2];
+    int ys[CELL_MAX + 2];
     for (int i = 0; i < cell_count; i++) {
         xs[i] = cell_cx[i];
         ys[i] = cell_cy[i];
     }
     xs[cell_count] = CORE_X;
     ys[cell_count] = CORE_Y;
-    int at = focus == CELL_CORE ? cell_count : focus;
+    int targets = cell_count + 1;
+    if (peer_text[0] != 0 && !sheet_open()) {
+        peer_pos(&xs[cell_count + 1], &ys[cell_count + 1]);
+        targets++;
+    }
+    int at = focus == CELL_CORE ? cell_count : focus == CELL_PEER ? cell_count + 1 : focus;
     int next;
     if (at < 0) {
         next = cell_count; /* start on the core */
     } else {
-        next = nearest(cell_count + 1, xs, ys, at, dx, dy);
+        next = nearest(targets, xs, ys, at, dx, dy);
+        if (next < 0 && dx > 0 && panel != P_NONE && it_n > 0) {
+            /* Right past the last cell: into the docked panel. */
+            set_highlight(hint, -1);
+            panel_nav(0, 0);
+            return;
+        }
         if (next < 0) {
             return;
         }
     }
-    int f = next == cell_count ? CELL_CORE : next;
+    int f = next == cell_count ? CELL_CORE : next == cell_count + 1 ? CELL_PEER : next;
     set_highlight(hint, f);
     focus_say(f);
 }
@@ -1951,17 +2628,22 @@ static void bar_key(char ch) {
         if (found > 1 && cands[0] != 0) {
             s_copy(bar_out, cands, 60);
         }
-    } else if (bar_len == 0 && panel != P_NONE && (it_n > 1 || ch == DESK_LEFT || ch == DESK_RIGHT) &&
+    } else if (bar_len == 0 && panel != P_NONE && it_n > 0 && pfocus >= 0 &&
                (ch == DESK_LEFT || ch == DESK_RIGHT || ch == DESK_UP || ch == DESK_DOWN)) {
+        /* A docked panel owns the arrows while one of its items has focus. */
         panel_nav(ch == DESK_LEFT ? -1 : ch == DESK_RIGHT ? 1 : 0, ch == DESK_UP ? -1 : ch == DESK_DOWN ? 1 : 0);
         return;
-    } else if (ch == DESK_LEFT || ch == DESK_RIGHT ||
-               (bar_len == 0 && (focus >= 0 || bar_hist_n == 0) && (ch == DESK_UP || ch == DESK_DOWN))) {
-        /* D-pad / arrows: spatial focus. Up/Down recall history only while
-         * nothing is focused (or while editing a line). */
+    } else if (ch == DESK_LEFT || ch == DESK_RIGHT || (bar_len == 0 && (ch == DESK_UP || ch == DESK_DOWN))) {
+        /* D-pad / arrows: spatial focus; the first arrow lands on the core.
+         * Up/Down recall history while a line is being typed (or PgUp/PgDn). */
         home_nav(ch == DESK_LEFT ? -1 : ch == DESK_RIGHT ? 1 : 0, ch == DESK_UP ? -1 : ch == DESK_DOWN ? 1 : 0);
         return;
-    } else if (ch == DESK_UP || ch == DESK_DOWN) {
+    } else if (ch == DESK_UP || ch == DESK_DOWN || ch == DESK_PGUP || ch == DESK_PGDN) {
+        if (ch == DESK_PGUP) {
+            ch = DESK_UP;
+        } else if (ch == DESK_PGDN) {
+            ch = DESK_DOWN;
+        }
         if (ch == DESK_UP && bar_hist_pos > 0) {
             bar_hist_pos--;
             bar_set(bar_hist[bar_hist_pos]);
@@ -1972,7 +2654,11 @@ static void bar_key(char ch) {
             return;
         }
     } else if (ch == DESK_ESC) {
-        if (panel != P_NONE) {
+        if (panel == P_FEED && feed_confirm >= 0) {
+            feed_confirm = -1;
+            console_puts("feed: cancel\n");
+            redraw_panel();
+        } else if (panel != P_NONE) {
             show_home();
         } else {
             set_highlight(-1, -1);
@@ -2161,6 +2847,17 @@ static void desktop_second(void) {
         return;
     }
     int changed = core_sample();
+    char peer[24];
+    if (link_peer(peer) && !s_eq(peer, peer_text)) {
+        s_copy(peer_text, peer, sizeof peer_text);
+        redraw_all();
+        return;
+    }
+    if (link_n > 0 && ++link_age > LINK_SECONDS) {
+        link_n = 0; /* the glow fades: repaint without the lines */
+        redraw_all();
+        return;
+    }
     cursor_erase();
     if (changed) {
         draw_core();
@@ -2239,10 +2936,116 @@ int desktop_active(void) {
     return desktop_on;
 }
 
+static inline unsigned char inb(unsigned short port) {
+    unsigned char value;
+    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static unsigned char cmos(unsigned char reg) {
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+/* Seconds since midnight UTC from the CMOS real-time clock, -1 if absent. */
+static int rtc_day_seconds(void) {
+    for (int spin = 0; spin < 100000 && (cmos(0x0a) & 0x80) != 0; spin++) {
+    }
+    unsigned char sec = cmos(0x00);
+    unsigned char min = cmos(0x02);
+    unsigned char hour = cmos(0x04);
+    unsigned char b = cmos(0x0b);
+    int pm = hour & 0x80;
+    hour &= 0x7f;
+    if ((b & 0x04) == 0) { /* BCD */
+        sec = (unsigned char)((sec & 0x0f) + (sec >> 4) * 10);
+        min = (unsigned char)((min & 0x0f) + (min >> 4) * 10);
+        hour = (unsigned char)((hour & 0x0f) + (hour >> 4) * 10);
+    }
+    if ((b & 0x02) == 0) { /* 12-hour */
+        hour = (unsigned char)(hour % 12 + (pm ? 12 : 0));
+    }
+    if (sec > 59 || min > 59 || hour > 23) {
+        return -1;
+    }
+    return hour * 3600 + min * 60 + sec;
+}
+
+static int tz_minutes = 180; /* UTC+3 by default; `tz +5:30` changes it */
+static int rtc_base = -1;    /* local seconds-of-day at clock_seconds == 0 */
+
+static void rtc_sync(void) {
+    int now = rtc_day_seconds();
+    if (now < 0) {
+        rtc_base = 0;
+        return;
+    }
+    long local = (long)now + tz_minutes * 60L - (long)clock_seconds;
+    local %= 86400L;
+    if (local < 0) {
+        local += 86400L;
+    }
+    rtc_base = (int)local;
+}
+
+/* `tz` shows the offset; `tz +3`, `tz -5`, `tz +5:30` set it. */
+void clock_tz(const char *arg, char *out, unsigned int size) {
+    if (arg != 0 && arg[0] != 0) {
+        int sign = 1;
+        const char *p = arg;
+        if (*p == '+' || *p == '-') {
+            sign = *p == '-' ? -1 : 1;
+            p++;
+        }
+        int h = 0;
+        int m = 0;
+        while (*p >= '0' && *p <= '9') {
+            h = h * 10 + (*p++ - '0');
+        }
+        if (*p == ':') {
+            p++;
+            while (*p >= '0' && *p <= '9') {
+                m = m * 10 + (*p++ - '0');
+            }
+        }
+        if (*p == 0 && h <= 14 && m < 60) {
+            tz_minutes = sign * (h * 60 + m);
+            rtc_sync();
+        }
+    }
+    int t = tz_minutes < 0 ? -tz_minutes : tz_minutes;
+    unsigned int n = s_cat(out, 0, "tz: UTC", size);
+    n = s_cat(out, n, tz_minutes < 0 ? "-" : "+", size);
+    n = u_cat(out, n, (unsigned int)(t / 60), size);
+    if (t % 60 != 0) {
+        n = s_cat(out, n, ":", size);
+        char mm[3] = {(char)('0' + t % 60 / 10), (char)('0' + t % 10), 0};
+        n = s_cat(out, n, mm, size);
+    }
+}
+
+/* Local wall-clock time as "HH:MM:SS" (for the journal). */
+void clock_now(char *out) {
+    if (rtc_base < 0) {
+        rtc_sync();
+    }
+    unsigned int local = ((unsigned int)rtc_base + clock_seconds) % 86400u;
+    print_u2(local / 3600u, out);
+    out[2] = ':';
+    print_u2(local / 60u % 60u, out + 3);
+    out[5] = ':';
+    print_u2(local % 60u, out + 6);
+    out[8] = 0;
+}
+
 static void publish_clock(void) {
-    unsigned int hours = (clock_seconds / 3600u) % 100u;
-    unsigned int minutes = (clock_seconds / 60u) % 60u;
-    unsigned int seconds = clock_seconds % 60u;
+    if (rtc_base < 0) {
+        rtc_sync();
+    }
+    unsigned int local = ((unsigned int)rtc_base + clock_seconds) % 86400u;
+    unsigned int hours = local / 3600u;
+    unsigned int minutes = (local / 60u) % 60u;
+    unsigned int seconds = local % 60u;
     print_u2(hours, clock_text + 5);
     print_u2(minutes, clock_text + 8);
     print_u2(seconds, clock_text + 11);
@@ -2250,9 +3053,21 @@ static void publish_clock(void) {
         redraw_clock();
         desktop_second();
     }
+    char up[24];
+    unsigned int n = s_cat(up, 0, " up ", sizeof up);
+    up[n++] = (char)('0' + clock_seconds / 36000u % 10u);
+    up[n++] = (char)('0' + clock_seconds / 3600u % 10u);
+    up[n++] = ':';
+    up[n++] = (char)('0' + clock_seconds / 600u % 6u);
+    up[n++] = (char)('0' + clock_seconds / 60u % 10u);
+    up[n++] = ':';
+    up[n++] = (char)('0' + clock_seconds % 60u / 10u);
+    up[n++] = (char)('0' + clock_seconds % 10u);
+    up[n++] = '\n';
+    up[n] = 0;
     console_puts("time ");
     console_puts(clock_text + 5);
-    console_putc('\n');
+    console_puts(up);
 }
 
 void timer_tick(void) {

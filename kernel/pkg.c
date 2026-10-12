@@ -454,6 +454,8 @@ static void cache_drop(const char *name) {
     }
 }
 
+void link_note(const char *lib);
+
 void *pkg_sym(const char *lib, const char *sym) {
     const unsigned char *data;
     unsigned int length;
@@ -490,7 +492,11 @@ void *pkg_sym(const char *lib, const char *sym) {
         }
     }
     lib_lookup_fn lookup = (lib_lookup_fn)(void *)(code + 4);
-    return lookup(sym, pkg_sym);
+    void *found = lookup(sym, pkg_sym);
+    if (found != 0) {
+        link_note(lib);
+    }
+    return found;
 }
 
 /* For the desktop: the INDEX-th package, whether it is installed and

@@ -19,6 +19,9 @@ struct genesis_api {
     void (*yield)(void);
     void *(*malloc)(unsigned int size);
     void (*free)(void *ptr);
+    /* The real framebuffer size (1024x768, 480x800 phones, 1920x1080 TVs). */
+    int width;
+    int height;
 };
 
 typedef void (*viewer_entry)(struct genesis_api *api);

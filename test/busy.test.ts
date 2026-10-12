@@ -24,10 +24,10 @@ test(
       await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
       await typeLine(guest, "desktop");
       await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
-      await guest.waitForSerial("time 00:00:01", DEFAULT_TIMEOUT_MS);
-      await guest.waitForSerial("time 00:00:02", DEFAULT_TIMEOUT_MS);
-      assert.match(guest.serial, /time 00:00:01/);
-      assert.match(guest.serial, /time 00:00:02/);
+      await guest.waitForSerial("up 00:00:01", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("up 00:00:02", DEFAULT_TIMEOUT_MS);
+      assert.match(guest.serial, /up 00:00:01/);
+      assert.match(guest.serial, /up 00:00:02/);
     } finally {
       await guest.stop();
     }
