@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { startGuest } from "../src/guest.js";
@@ -36,6 +37,15 @@ test(
       const ppm = await guest.screendump();
       assert.equal(screenTextError(ppm, BOOT_MARKER), null);
       assert.equal(screenTextError(ppm, HELP_REPLY, 2), null);
+      // Every command Tab can complete is named in help.
+      await guest.waitForSerial("cells: layout", DEFAULT_TIMEOUT_MS);
+      const src = readFileSync(new URL("../../kernel/kernel.c", import.meta.url), "utf8");
+      const table = /sh_words\[\] = \{([^}]*)\}/.exec(src)![1]!;
+      const words = [...table.matchAll(/"([a-z]+)"/g)].map((m) => m[1]!);
+      const help = guest.serial.slice(guest.serial.indexOf(HELP_REPLY));
+      for (const w of words) {
+        assert.ok(new RegExp(`(^|[\\s(,|:])${w}([\\s),|:]|$)`, "m").test(help), `help не называет ${w}`);
+      }
     } finally {
       await guest.stop();
     }

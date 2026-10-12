@@ -2572,10 +2572,16 @@ static void execute(char *input) {
     if (str_eq(input, "help")) {
         console_puts("commands: help echo clear mem alloc heap ls cat write rm run spawn ps desktop\n");
         console_puts("folders: pwd cd mkdir rmdir mv cp  paths: /docs/note.txt ../x ./y\n");
-        console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
+        console_puts("files: ls [DIR], cat FILE, write FILE TEXT, rm FILE, edit FILE (editor)\n");
+        console_puts("shell: sh FILE, set, grep WORD [FILE], wc [FILE], head [N] [FILE]\n");
+        console_puts("  NAME=v $NAME \"..\" '..' | > >> ; & #  Up/Down history, Tab completes\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
-        console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
-        console_puts("net: net, dhcp, ping HOST, dns NAME, http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
+        console_puts("tasks: run NAME [ARGS], spawn NAME, NAME &, ps, kill N\n");
+        console_puts("memory: mem, heap, alloc N   system: tz [+H[:MM]], reboot, poweroff\n");
+        console_puts("desktop: desktop [WxH], pin DIR, unpin DIR, feed [all|files|editor|term|pkg|prog]\n");
+        console_puts("net: net (ifconfig), net set IP MASK GW DNS, dhcp, ping HOST, dns NAME\n");
+        console_puts("  http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
+        console_puts("link: ping (no host: Genesis Link peer), say TEXT, send FILE\n");
         console_puts("C: cc FILE.c or run FILE.c  (cc /docs/hello.c, cc /docs/fib.c)\n");
         console_puts("web: browse URL (/docs/index.html, http://..., about:home), web back|reload|follow N\n");
         console_puts("cells: layout list | move NAME POS | add NAME | remove NAME | reset | edit\n");
