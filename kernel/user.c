@@ -31,8 +31,22 @@ enum {
     POOL_BASE = USER_POOL_ADDR, POOL_PAGES = 4096, /* 16 MiB of frames */
     USER_STACK_PAGES = 16, USER_HEAP = 64 * 1024,
 };
+#ifdef __x86_64__
 #define PG_NX (1ul << 63)
 #define ADDR_MASK 0x000ffffffffff000ul
+#define PT_ENTRIES 512
+/* Index shifts of the table levels above the page table: PML4, PDPT, PD. */
+static const int pt_shifts[] = {39, 30, 21};
+#else
+/* i686: two-level 32-bit paging, no NX bit. */
+#define PG_NX 0ul
+#define ADDR_MASK 0xfffff000ul
+#define PT_ENTRIES 1024
+static const int pt_shifts[] = {22};
+#define USER_PDE_FIRST (USER_BASE >> 22)
+#define USER_PDE_LAST ((USER_END - 1) >> 22)
+#endif
+#define PT_LEVELS ((int)(sizeof pt_shifts / sizeof pt_shifts[0]))
 
 static unsigned char frame_used[POOL_PAGES];
 static unsigned int frames_in_use;
@@ -47,7 +61,7 @@ static unsigned long frame_alloc(void) {
             frame_used[i] = 1;
             frames_in_use++;
             unsigned long *p = (unsigned long *)(POOL_BASE + (unsigned long)i * 4096ul);
-            for (int k = 0; k < 512; k++) {
+            for (unsigned int k = 0; k < 4096 / sizeof(unsigned long); k++) {
                 p[k] = 0;
             }
             return (unsigned long)p;
@@ -84,9 +98,8 @@ static unsigned long *table_of(unsigned long entry) {
 /* Page-table entry for VA in address space CR3, created on demand. */
 static unsigned long *pte_for(unsigned long cr3, unsigned long va, int create) {
     unsigned long *t = (unsigned long *)cr3;
-    int shifts[3] = {39, 30, 21};
-    for (int lvl = 0; lvl < 3; lvl++) {
-        unsigned long *e = &t[(va >> shifts[lvl]) & 511];
+    for (int lvl = 0; lvl < PT_LEVELS; lvl++) {
+        unsigned long *e = &t[(va >> pt_shifts[lvl]) & (PT_ENTRIES - 1)];
         if (!(*e & PG_P)) {
             if (!create) {
                 return 0;
@@ -99,7 +112,7 @@ static unsigned long *pte_for(unsigned long cr3, unsigned long va, int create) {
         }
         t = table_of(*e);
     }
-    return &t[(va >> 12) & 511];
+    return &t[(va >> 12) & (PT_ENTRIES - 1)];
 }
 
 /* Map a fresh zeroed page at VA; returns its kernel (identity) address. */
@@ -139,11 +152,11 @@ static int map_copy(unsigned long cr3, unsigned long va, const unsigned char *sr
 }
 
 static void free_level(unsigned long *t, int lvl) {
-    for (int i = 0; i < 512; i++) {
+    for (int i = 0; i < PT_ENTRIES; i++) {
         if (!(t[i] & PG_P)) {
             continue;
         }
-        if (lvl < 3) {
+        if (lvl < PT_LEVELS) {
             free_level(table_of(t[i]), lvl + 1);
         }
         frame_free(t[i] & ADDR_MASK);
@@ -155,11 +168,20 @@ void user_space_free(unsigned long cr3) {
         return;
     }
     unsigned long *pml4 = (unsigned long *)cr3;
+#ifdef __x86_64__
     unsigned long e = pml4[USER_PML4_SLOT];
     if (e & PG_P) {
         free_level(table_of(e), 1);
         frame_free(e & ADDR_MASK);
     }
+#else
+    for (unsigned long i = USER_PDE_FIRST; i <= USER_PDE_LAST; i++) {
+        if (pml4[i] & PG_P) {
+            free_level(table_of(pml4[i]), 1);
+            frame_free(pml4[i] & ADDR_MASK);
+        }
+    }
+#endif
     frame_free(cr3);
 }
 
@@ -176,7 +198,15 @@ unsigned long user_space_new(const unsigned char *image, unsigned int len, const
     }
     unsigned long *pml4 = (unsigned long *)cr3;
     unsigned long *kpml4 = (unsigned long *)kernel_cr3;
+#ifdef __x86_64__
     pml4[0] = kpml4[0]; /* the kernel, supervisor-only (no U bit) */
+#else
+    for (unsigned long i = 0; i < PT_ENTRIES; i++) {
+        if (i < USER_PDE_FIRST || i > USER_PDE_LAST) {
+            pml4[i] = kpml4[i]; /* 4 MiB kernel pages, supervisor-only */
+        }
+    }
+#endif
     unsigned int stub_len = (unsigned int)(user_stub_end - user_stub_start);
     int ok = map_copy(cr3, USER_BASE, (const unsigned char *)user_stub_start, stub_len, 0, 0) &&
              map_copy(cr3, USER_CODE, image, len, USER_HEAP, PG_RW);
@@ -204,9 +234,20 @@ unsigned long user_space_new(const unsigned char *image, unsigned int len, const
     }
     last[4096 - 256 + n] = 0;
     /* Return address of the entry: the exit stub; rsp % 16 == 8 as after a call. */
+#ifdef __x86_64__
     unsigned long rsp = args_va - 16 - 8;
     *(unsigned long *)(last + (rsp - (USER_STACK_TOP - 4096))) =
         USER_BASE + (unsigned long)(stub_exit - user_stub_start);
+#else
+    /* cdecl: return address, then print, sleep, sym, args on the stack. */
+    unsigned long rsp = args_va - 16 - 4 - 16;
+    unsigned long *frame = (unsigned long *)(last + (rsp - (USER_STACK_TOP - 4096)));
+    frame[0] = USER_BASE + (unsigned long)(stub_exit - user_stub_start);
+    frame[1] = USER_BASE + (unsigned long)(stub_print - user_stub_start);
+    frame[2] = USER_BASE + (unsigned long)(stub_sleep - user_stub_start);
+    frame[3] = USER_BASE + (unsigned long)(stub_sym - user_stub_start);
+    frame[4] = n > 0 ? args_va : 0;
+#endif
     start->rip = USER_CODE;
     start->rsp = rsp;
     start->print = USER_BASE + (unsigned long)(stub_print - user_stub_start);
@@ -375,8 +416,13 @@ static __attribute__((noreturn)) void panic(struct trap_frame *f) {
         console_puts(" addr ");
         put_hex(cr2);
     }
+#ifdef __x86_64__
+    unsigned long ksp = f->rsp;
+#else
+    unsigned long ksp = (unsigned long)&f->rsp; /* no esp/ss in a ring-0 frame */
+#endif
     console_puts(" rsp ");
-    put_hex(f->rsp);
+    put_hex(ksp);
     console_puts("\ncode");
     for (unsigned long a = f->rip - 8; a < f->rip + 8; a++) {
         console_puts(" ");
@@ -385,7 +431,7 @@ static __attribute__((noreturn)) void panic(struct trap_frame *f) {
     console_puts("\nstack");
     for (int i = 0; i < 6; i++) {
         console_puts(" ");
-        put_hex(((const unsigned long *)f->rsp)[i]);
+        put_hex(((const unsigned long *)ksp)[i]);
     }    console_puts("\nsystem halted\n");
     for (;;) {
         __asm__ volatile("cli; hlt");
@@ -517,6 +563,7 @@ void fault_handler(struct trap_frame *f) {
 
 /* ---------- GDT + TSS ---------- */
 
+#ifdef __x86_64__
 struct tss {
     unsigned int reserved0;
     unsigned long rsp[3];
@@ -570,8 +617,62 @@ static void gdt_init(void) {
         : "rax", "memory");
 }
 
+#else
+/* i686 TSS: only esp0/ss0 matter (ring 3 -> ring 0 stack switch). */
+struct tss {
+    unsigned int link, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags;
+    unsigned int eax, ecx, edx, ebx, esp, ebp, esi, edi;
+    unsigned int es, cs, ss, ds, fs, gs, ldt;
+    unsigned short trap, iomap;
+} __attribute__((packed));
+
+static struct tss tss;
+static unsigned long long gdt[6];
+
+void user_set_kstack(unsigned long top) {
+    tss.esp0 = top;
+}
+
+static void gdt_init(void) {
+    gdt[0] = 0;
+    gdt[1] = 0x00cf9a000000ffffull; /* 0x08 kernel code, flat 4 GiB */
+    gdt[2] = 0x00cf92000000ffffull; /* 0x10 kernel data */
+    gdt[3] = 0x00cff2000000ffffull; /* 0x18 user data (0x1b) */
+    gdt[4] = 0x00cffa000000ffffull; /* 0x20 user code (0x23) */
+    unsigned long long base = (unsigned long)&tss;
+    unsigned long long limit = sizeof tss - 1;
+    gdt[5] = (limit & 0xffff) | ((base & 0xffffff) << 16) | (0x89ull << 40) |
+             (((limit >> 16) & 0xf) << 48) | (((base >> 24) & 0xff) << 56);
+    tss.ss0 = 0x10;
+    tss.iomap = sizeof tss; /* no I/O bitmap: user in/out faults */
+    struct {
+        unsigned short limit;
+        unsigned long base;
+    } __attribute__((packed)) ptr = {sizeof gdt - 1, (unsigned long)gdt};
+    __asm__ volatile(
+        "lgdt %0\n\t"
+        "ljmp $0x08, $1f\n"
+        "1:\n\t"
+        "mov $0x10, %%ax\n\t"
+        "mov %%ax, %%ss\n\t"
+        /* ds/es/fs/gs = user data (DPL 3): usable in ring 0 and valid after
+         * iret to ring 3, so traps never have to reload them. */
+        "mov $0x1b, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        "mov $0x28, %%ax\n\t"
+        "ltr %%ax\n\t"
+        :
+        : "m"(ptr)
+        : "eax", "memory");
+}
+#endif
+
 void user_init(void) {
     kernel_cr3 = read_cr3();
+#ifdef __x86_64__
     unsigned int a, b, c, d;
     __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u));
     if (d & (1u << 20)) {
@@ -581,6 +682,7 @@ void user_init(void) {
         __asm__ volatile("wrmsr" ::"a"(lo), "d"(hi), "c"(0xc0000080u));
         nx_ok = 1;
     }
+#endif
     /* SSE for programs and viewers: CR0.EM off, MP on; CR4.OSFXSR + OSXMMEXCPT. */
     unsigned long cr;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr));

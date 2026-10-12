@@ -1,6 +1,11 @@
 /* Tasks: fixed slots, own kernel stacks, round-robin on the PIT IRQ.
  * Task 0 is the boot thread (shell loop, ring 0). Programs from disk run in
  * ring 3, each in its own address space (see user.c). */
+#ifdef __x86_64__
+#define PUSHF_POP "pushfq; popq"
+#else
+#define PUSHF_POP "pushfl; popl"
+#endif
 #include "fs_limits.h"
 #include "user.h"
 
@@ -8,7 +13,11 @@ void console_puts(const char *text);
 void console_putc(char ch);
 
 
+#ifdef __x86_64__
 enum { TASK_MAX = 4, TASK_STACK = 16384, FRAME_REGS = 15 };
+#else
+enum { TASK_MAX = 4, TASK_STACK = 16384, FRAME_REGS = 8 }; /* pushad */
+#endif
 enum { TASK_FREE = 0, TASK_READY, TASK_DEAD };
 
 struct task {
@@ -41,7 +50,7 @@ static volatile int current;
 static volatile unsigned int jiffies;
 
 static void irq_off(unsigned long *flags) {
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(*flags)::"memory");
+    __asm__ volatile(PUSHF_POP " %0; cli" : "=r"(*flags)::"memory");
 }
 
 static void irq_restore(unsigned long flags) {
@@ -81,8 +90,13 @@ unsigned long task_switch(unsigned long rsp) {
         tasks[prev].state = TASK_FREE;
     }
     if (next != prev) {
+#ifdef __x86_64__
         __asm__ volatile("fxsave64 %0" : "=m"(fpu[prev]));
         __asm__ volatile("fxrstor64 %0" ::"m"(fpu[next]));
+#else
+        __asm__ volatile("fxsave %0" : "=m"(fpu[prev]));
+        __asm__ volatile("fxrstor %0" ::"m"(fpu[next]));
+#endif
         unsigned long want = tasks[next].cr3 != 0 ? tasks[next].cr3 : user_kernel_cr3();
         unsigned long have;
         __asm__ volatile("mov %%cr3, %0" : "=r"(have));
@@ -145,12 +159,17 @@ int task_spawn_user(const char *name, const unsigned char *image, unsigned int l
     *--top = 0x202;
     *--top = USER_CS;
     *--top = st.rip;
+#ifdef __x86_64__
     /* r15 .. rax as isr_irq0 pops them; rdi/rsi/rdx/rcx carry the arguments. */
     unsigned long regs[FRAME_REGS] = {0};
     regs[9] = st.print;  /* rdi */
     regs[10] = st.sleep; /* rsi */
     regs[11] = st.sym;   /* rdx */
     regs[12] = st.args;  /* rcx */
+#else
+    /* i686: the popad frame of irq32.asm; arguments are on the user stack. */
+    unsigned long regs[FRAME_REGS] = {0};
+#endif
     for (int i = FRAME_REGS - 1; i >= 0; i--) {
         *--top = regs[i];
     }
