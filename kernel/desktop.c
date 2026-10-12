@@ -420,6 +420,8 @@ static int focus = -1;     /* keyboard focus: cell index, CELL_CORE or -1 */
 static int hint = -1;      /* cell matching what is typed in the bar */
 static int core_mem;
 static int core_tasks;
+static int core_alarm; /* seconds the core stays red after a task crash */
+extern int task_crash_take(char *out, unsigned int cap);
 static int core_phase;
 static unsigned int row_color[FB_MAX_H];
 static short star_x[80];
@@ -850,7 +852,7 @@ static void draw_core(void) {
     if (sheet_open()) {
         return;
     }
-    int warn = core_mem >= 85;
+    int warn = core_mem >= 85 || core_alarm > 0;
     int pulse = core_tasks > 0 && core_phase;
     unsigned int line = warn ? RED : CYAN;
     unsigned int mid = warn ? RED_MID : CYAN_MID;
@@ -886,7 +888,8 @@ static void draw_core(void) {
     text_c(CORE_X, CORE_Y, s, AMBER, 2);
     int max_bg = task_max() - 1;
     core_bar(CORE_Y + CORE_R * 24 / 112, max_bg > 0 ? core_tasks * 100 / max_bg : 0, AMBER_MID, AMBER);
-    text_c(CORE_X, CORE_Y + CORE_R * 50 / 112, warn ? "мало памяти!" : "щёлкни: задачи", warn ? RED : MUTED, 1);
+    text_c(CORE_X, CORE_Y + CORE_R * 50 / 112,
+           core_alarm > 0 ? "сбой задачи!" : warn ? "мало памяти!" : "щёлкни: задачи", warn ? RED : MUTED, 1);
 }
 
 static int core_sample(void) {
@@ -1159,7 +1162,7 @@ static int feed_match(char type, int filter) {
     case F_EDITOR: return type == 'e' || type == 's';
     case F_TERM: return type == 'c';
     case F_PKG: return type == 'i' || type == 'r';
-    case F_PROG: return type == 'p' || type == 'k';
+    case F_PROG: return type == 'p' || type == 'k' || type == 'x';
     default: return 1;
     }
 }
@@ -1173,6 +1176,7 @@ static const char *feed_type_name(char type) {
     case 'r': return "удаление";
     case 'p': return "запуск";
     case 'k': return "остановка";
+    case 'x': return "сбой";
     default: return "команда";
     }
 }
@@ -1268,11 +1272,11 @@ static void draw_feed(int x0, int y0, int inner_w) {
             journal_get(id, time, &type, text, sizeof text);
             int y = top + k * (FEED_CARD_H + FEED_GAP);
             int x = lx + P(26);
-            fill(lx - P(5), y + FEED_CARD_H / 2 - P(5), P(11), P(11), type == 'c' ? CYAN : AMBER);
+            fill(lx - P(5), y + FEED_CARD_H / 2 - P(5), P(11), P(11), type == 'c' ? CYAN : type == 'x' ? RED : AMBER);
             frame_rect(x, y, FEED_CARD_W, FEED_CARD_H, id == feed_confirm ? RED : CYAN_MID, CELL);
             time[5] = 0;
             ui_text(x + P(10), y + P(8), time, MUTED, 1);
-            ui_text(x + P(10) + 6 * (t1 + 2), y + P(8), feed_type_name(type), type == 'c' ? CYAN : AMBER, 1);
+            ui_text(x + P(10) + 6 * (t1 + 2), y + P(8), feed_type_name(type), type == 'c' ? CYAN : type == 'x' ? RED : AMBER, 1);
             int max_chars = (FEED_CARD_W - P(20)) / (t2 + 2);
             char clip[80];
             s_copy(clip, text, sizeof clip);
@@ -1306,7 +1310,7 @@ static void draw_feed(int x0, int y0, int inner_w) {
         int id = feed_ids[feed_first + k];
         journal_get(id, time, &type, text, sizeof text);
         int x = left + k * (FEED_CARD_W + FEED_GAP);
-        unsigned int dot = type == 'c' ? CYAN : AMBER;
+        unsigned int dot = type == 'c' ? CYAN : type == 'x' ? RED : AMBER;
         fill(x + FEED_CARD_W / 2 - 1, top + FEED_CARD_H, 3, ly - top - FEED_CARD_H, CYAN_DIM);
         fill(x + FEED_CARD_W / 2 - P(6), ly - P(6), P(13), P(13), dot);
         frame_rect(x, top, FEED_CARD_W, FEED_CARD_H, id == feed_confirm ? RED : CYAN_MID, CELL);
@@ -2190,6 +2194,12 @@ static void feed_replay(int pos) {
     if (!journal_get(id, time, &type, text, sizeof text)) {
         return;
     }
+    if (type == 'x') {
+        console_puts("feed: crash ");
+        console_puts(text);
+        console_putc('\n');
+        return; /* a crash report, nothing to replay */
+    }
     if (destructive(text) && feed_confirm != id) {
         feed_confirm = id;
         console_puts("feed: confirm ");
@@ -2843,10 +2853,21 @@ void desktop_key(char ch) {
 
 /* Once a second: clock, core numbers, live panels. */
 static void desktop_second(void) {
+    char crash[128];
+    if (task_crash_take(crash, sizeof crash)) {
+        journal_add('x', crash); /* Лента: a red "сбой" card */
+        core_alarm = 3;
+        if (view == VIEW_HOME && !editor_active()) {
+            redraw_all();
+        }
+    }
     if (view != VIEW_HOME || editor_active()) {
         return;
     }
     int changed = core_sample();
+    if (core_alarm > 0 && --core_alarm == 0) {
+        changed = 1; /* the red flash ends */
+    }
     char peer[24];
     if (link_peer(peer) && !s_eq(peer, peer_text)) {
         s_copy(peer_text, peer, sizeof peer_text);
