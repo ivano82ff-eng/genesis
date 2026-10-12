@@ -34,6 +34,7 @@ SECTIONS
     }
 
     kernel_load_end = .;
+    ASSERT(bss_end <= 0x600000, "kernel BSS runs into PROG_LOAD_ADDR (fs_limits.h)")
 
     /DISCARD/ :
     {

@@ -49,6 +49,7 @@ void cmd_ps(void);
 #else
 #define PUSHF_POP "pushfl; popl"
 #endif
+#include "fs_limits.h"
 #include "editor.h"
 #include "utf8.h"
 
@@ -875,7 +876,8 @@ struct mem_region {
 static struct mem_region mem_map[MAP_MAX];
 static int mem_map_count = 0;
 static unsigned long usable_bytes = 0;
-static unsigned char *const HEAP = (unsigned char *)0x200000;
+/* Was 0x200000, inside the kernel's own BSS once it grew past 1 MiB. */
+static unsigned char *const HEAP = (unsigned char *)KERNEL_HEAP_ADDR;
 static unsigned int heap_used = 0;
 
 static void memory_init(unsigned int info_addr) {
