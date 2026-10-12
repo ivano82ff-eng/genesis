@@ -40,11 +40,13 @@ test(
     const guest = await startGuest({ isoPath: image.isoPath, display: "none" });
     try {
       await guest.waitForSerial(PROMPT, DEFAULT_TIMEOUT_MS);
+      // User code sits at 0x80_0001_0000 on x86_64 and 0x4001_0000 on i686.
+      const code = process.env.GENESIS_ARCH === "i686" ? "0x4001" : "0x8000";
       const crashes: [string, RegExp][] = [
         ["null", /task \d \(crashy\): page fault at 0x0 \(write, kernel memory\)/],
         ["kernel", /task \d \(crashy\): page fault at 0x100000 \(write, kernel memory\)/],
-        ["div", /task \d \(crashy\): divide error at 0x8000/],
-        ["op", /task \d \(crashy\): invalid opcode at 0x8000/],
+        ["div", new RegExp(`task \\d \\(crashy\\): divide error at ${code}`)],
+        ["op", new RegExp(`task \\d \\(crashy\\): invalid opcode at ${code}`)],
         ["sys", /task \d \(crashy\): bad pointer 0x100000 in print/],
       ];
       for (const [mode, expected] of crashes) {

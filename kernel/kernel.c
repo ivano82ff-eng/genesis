@@ -809,10 +809,10 @@ static int parse_u32(const char *text, unsigned int *out) {
     return 1;
 }
 
-static void print_hex64(unsigned long value) {
+static void print_hex64(unsigned long long value) {
     console_puts("0x");
     for (int shift = 60; shift >= 0; shift -= 4) {
-        unsigned int nibble = (unsigned int)((value >> shift) & 0xful);
+        unsigned int nibble = (unsigned int)((value >> shift) & 0xfull);
         console_putc((char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10)));
     }
 }
