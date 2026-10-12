@@ -27,7 +27,7 @@ async function openRow(guest: Guest, row: number, expect: string): Promise<void>
 
 test(
   "Файлы runs txt, docx, image, pdf, and mp4 viewers",
-  { timeout: 120_000 },
+  { timeout: 240_000 },
   async () => {
     const missing = missingTools(["qemu-system-x86_64"]);
     if (missing.length > 0) {

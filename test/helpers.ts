@@ -28,9 +28,9 @@ export function pixel(
 
 /** Push the pointer into the top-left corner (the guest clamps it at 0,0). */
 export async function homePointer(guest: Guest): Promise<void> {
-  for (let i = 0; i < 30; i++) {
-    await guest.monitor("mouse_move -40 -40");
-    await delay(30);
+  for (let i = 0; i < 17; i++) {
+    await guest.monitor("mouse_move -120 -120");
+    await delay(15);
   }
   await delay(300);
 }
