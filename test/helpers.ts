@@ -52,7 +52,42 @@ export async function click(guest: Guest, x: number, y: number): Promise<void> {
     await guest.monitor("mouse_button 1");
     await delay(80);
     await guest.monitor("mouse_button 0");
+    // cells open on release: give the guest a moment before the caller looks
+    await delay(250);
   } catch {
     // the guest may keep QMP busy or close it (poweroff) before the reply
   }
+}
+
+async function moveBy(guest: Guest, dx: number, dy: number): Promise<void> {
+  while (dx !== 0 || dy !== 0) {
+    const sx = Math.max(-40, Math.min(40, dx));
+    const sy = Math.max(-40, Math.min(40, dy));
+    await guest.monitor(`mouse_move ${sx} ${sy}`);
+    dx -= sx;
+    dy -= sy;
+    await delay(200);
+  }
+}
+
+/** Press at (x1, y1), move with the button held, release at (x2, y2). */
+export async function drag(guest: Guest, x1: number, y1: number, x2: number, y2: number): Promise<void> {
+  await homePointer(guest);
+  await moveBy(guest, x1, y1);
+  await guest.monitor("mouse_button 1");
+  await delay(150);
+  await moveBy(guest, x2 - x1, y2 - y1);
+  await delay(150);
+  await guest.monitor("mouse_button 0");
+  await delay(150);
+}
+
+/** Hold the left button at (x, y) for MS milliseconds (touch long-press). */
+export async function longPress(guest: Guest, x: number, y: number, ms = 900): Promise<void> {
+  await homePointer(guest);
+  await moveBy(guest, x, y);
+  await guest.monitor("mouse_button 1");
+  await delay(ms);
+  await guest.monitor("mouse_button 0");
+  await delay(150);
 }

@@ -121,7 +121,7 @@ test("journal records actions; Лента re-runs a command, confirms rm, filter
     await key(guest, "esc");
     await guest.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
     await delay(300);
-    const feedCell = cellAt(5, 8); // strdemo added an eighth cell
+    const feedCell = cellAt(5, 9); // strdemo added a ninth cell
     await click(guest, feedCell.x, feedCell.y);
     await guest.waitForSerial("feed: Все ", DEFAULT_TIMEOUT_MS);
     // Newest card is focused: rm. Enter asks first; Esc cancels.
@@ -150,7 +150,7 @@ test("journal records actions; Лента re-runs a command, confirms rm, filter
     await guest.waitForSerial("feed: Пакеты 1", DEFAULT_TIMEOUT_MS);
     // «В ленту» from the Пакеты panel opens Лента filtered to it.
     await key(guest, "esc");
-    const pkgCell = cellAt(3, 8);
+    const pkgCell = cellAt(3, 9);
     await click(guest, pkgCell.x, pkgCell.y);
     await guest.waitForSerial("Назад", DEFAULT_TIMEOUT_MS);
     const pk = countOf(guest.serial, "feed: Пакеты");

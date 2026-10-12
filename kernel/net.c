@@ -839,6 +839,122 @@ static unsigned int parse_uint(const char **ps) {
     return v;
 }
 
+/* GET http://host[:port]/path into OUT (headers stripped, chunked bodies
+ * joined). Returns the HTTP status, or a negative error:
+ * -1 bad URL, -2 no network, -3 unknown host, -4 cannot connect, -5 send
+ * failed, -6 no reply. A redirect's Location: lands in LOC. */
+int net_http_get(const char *url, char *out, unsigned int cap, unsigned int *out_len, char *loc, unsigned int loc_cap) {
+    *out_len = 0;
+    if (loc_cap) loc[0] = 0;
+    if (starts(url, "http://")) url += 7;
+    else if (starts(url, "https://")) url += 8; /* no TLS: ask over plain HTTP (v86 upgrades it) */
+    char host[128];
+    unsigned int n = 0;
+    while (*url && *url != '/' && *url != ':' && *url != '?' && *url != '#' && n + 1 < sizeof host) host[n++] = *url++;
+    host[n] = 0;
+    if (n == 0) return -1;
+    unsigned int port = 80;
+    if (*url == ':') {
+        url++;
+        port = parse_uint(&url);
+    }
+    const char *path = (*url == '/' || *url == '?') ? url : "/";
+    unsigned int plen = 0;
+    while (path[plen] && path[plen] != ' ' && path[plen] != '#') plen++;
+    if (!ensure_up()) return -2;
+    unsigned char ip[4];
+    if (!net_resolve(host, ip)) return -3;
+    int s = tcp_open(ip, port);
+    if (s < 0) return -4;
+    static unsigned char req[700];
+    unsigned int k = 0;
+    const char *parts[] = {"GET ", 0, " HTTP/1.0\r\nHost: ", host, port == 80 ? "" : ":", 0,
+                           "\r\nUser-Agent: genesis-browser\r\nAccept: text/html, text/plain\r\nConnection: close\r\n\r\n"};
+    char portstr[8];
+    unsigned int pn = 0;
+    if (port != 80) {
+        char tmp[8];
+        unsigned int t = 0, v = port;
+        do { tmp[t++] = (char)('0' + v % 10u); v /= 10u; } while (v && t < 7);
+        while (t) portstr[pn++] = tmp[--t];
+    }
+    portstr[pn] = 0;
+    for (int i = 0; i < 7; i++) {
+        if (i == 1) {
+            if (path[0] == '?' && k < 600) req[k++] = '/';
+            for (unsigned int j = 0; j < plen && k < 560; j++) req[k++] = (unsigned char)path[j];
+            continue;
+        }
+        const char *c = i == 5 ? portstr : parts[i];
+        for (; *c && k < 690; c++) req[k++] = (unsigned char)*c;
+    }
+    if (tcp_send(s, req, k) < 0) {
+        tcp_close(s);
+        return -5;
+    }
+    unsigned int total = 0;
+    for (;;) {
+        if (total + 1 >= cap) break;
+        int got = tcp_recv(s, (unsigned char *)out + total, cap - 1 - total, 6000);
+        if (got <= 0) break;
+        total += (unsigned int)got;
+    }
+    tcp_close(s);
+    out[total] = 0;
+    if (total < 12 || !starts(out, "HTTP/")) return total ? 200 : -6;
+    const char *p = out;
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    int status = (int)parse_uint(&p);
+    /* headers */
+    unsigned int i = 0;
+    int chunked = 0;
+    while (i + 1 < total) {
+        unsigned int e = i;
+        while (e < total && out[e] != '\n') e++;
+        unsigned int len = e - i;
+        if (len > 0 && out[i + len - 1] == '\r') len--;
+        if (len == 0) { i = e + 1; break; }
+        const char *h = out + i;
+        if (len > 9 && (h[0] == 'L' || h[0] == 'l') && (starts(h + 1, "ocation:"))) {
+            unsigned int a = 9;
+            while (a < len && h[a] == ' ') a++;
+            unsigned int m = 0;
+            while (a < len && m + 1 < loc_cap) loc[m++] = h[a++];
+            if (loc_cap) loc[m] = 0;
+        }
+        if (len > 18 && (starts(h, "Transfer-Encoding:") || starts(h, "transfer-encoding:"))) {
+            for (unsigned int a = 18; a + 7 <= len; a++) if (starts(h + a, "chunked")) chunked = 1;
+        }
+        i = e + 1;
+        if (e >= total) { i = total; break; }
+    }
+    /* move the body to the front */
+    unsigned int body = 0;
+    if (!chunked) {
+        for (unsigned int j = i; j < total; j++) out[body++] = out[j];
+    } else {
+        unsigned int j = i;
+        while (j < total) {
+            unsigned int sz = 0;
+            while (j < total && out[j] != '\r' && out[j] != '\n') {
+                char c = out[j++];
+                int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+                if (d < 0) { while (j < total && out[j] != '\n') j++; break; }
+                sz = sz * 16u + (unsigned int)d;
+            }
+            while (j < total && out[j] != '\n') j++;
+            j++;
+            if (sz == 0) break;
+            for (unsigned int a = 0; a < sz && j < total; a++) out[body++] = out[j++];
+            while (j < total && (out[j] == '\r' || out[j] == '\n')) j++;
+        }
+    }
+    out[body] = 0;
+    *out_len = body;
+    return status;
+}
+
 static void cmd_http(const char *url) {
     url = skip_sp(url);
     if (starts(url, "get ")) url = skip_sp(url + 4);

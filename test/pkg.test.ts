@@ -80,9 +80,9 @@ test(
     const image = await buildImage();
     const dir = await mkdtemp(path.join(os.tmpdir(), "genesis-pkgfull-"));
     const disk = path.join(dir, "disk.img");
-    // 256 catalog slots: 23 built-ins (4 folders + 19 files) + 231 imports + 1 write leave 1 free.
-    const fill = Array.from({ length: 231 }, (_, i) => ({ name: `fill${i}`, data: Buffer.from("x") }));
-    assert.equal((await importFiles(disk, fill)).imported.length, 231);
+    // 256 catalog slots: 25 built-ins (4 folders + 21 files) + 229 imports + 1 write leave 1 free.
+    const fill = Array.from({ length: 229 }, (_, i) => ({ name: `fill${i}`, data: Buffer.from("x") }));
+    assert.equal((await importFiles(disk, fill)).imported.length, 229);
     const guest = await startGuest({ isoPath: image.isoPath, display: "none", diskPath: disk, boot: "cd" });
     try {
       await guest.waitForSerial("genesis:/home> ", DEFAULT_TIMEOUT_MS);
