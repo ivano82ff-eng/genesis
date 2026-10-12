@@ -1355,6 +1355,8 @@ extern const unsigned char ticker_bin[];
 extern const unsigned char ticker_bin_end[];
 extern const unsigned char pulse_bin[];
 extern const unsigned char pulse_bin_end[];
+extern const unsigned char crashy_bin[];
+extern const unsigned char crashy_bin_end[];
 extern const unsigned char open_bin[];
 extern const unsigned char open_bin_end[];
 extern const unsigned char vtxt_bin[];
@@ -1408,6 +1410,7 @@ static void fs_seed(void) {
     fs_seed_blob("/bin/vmp4", vmp4_bin, vmp4_bin_end);
     fs_seed_blob("/bin/ticker", ticker_bin, ticker_bin_end);
     fs_seed_blob("/bin/pulse", pulse_bin, pulse_bin_end);
+    fs_seed_blob("/bin/crashy", crashy_bin, crashy_bin_end);
     fs_seed_blob("/docs/note.txt", sample_note_txt, sample_note_txt_end);
     fs_seed_blob("/docs/note.docx", sample_note_docx, sample_note_docx_end);
     fs_seed_blob("/docs/pic.png", sample_pic_png, sample_pic_png_end);
@@ -1419,7 +1422,7 @@ static void fs_seed(void) {
 /* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
 int fs_builtin_name(const char *name) {
     static const char *const names[] = {"readme", "hello", "open", "vtxt", "vdocx", "vimg", "vpdf",
-                                        "vmp4", "ticker", "pulse", "note.txt", "note.docx", "pic.png",
+                                        "vmp4", "ticker", "pulse", "crashy", "note.txt", "note.docx", "pic.png",
                                         "pic.jpg", "note.pdf", "clip.mp4"};
     for (unsigned int i = 0; i < sizeof names / sizeof names[0]; i++) {
         if (str_eq(name, names[i])) {

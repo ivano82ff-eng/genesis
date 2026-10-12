@@ -174,6 +174,7 @@ export async function buildImage(): Promise<ImagePaths> {
   await exec("nasm", ["-fbin", path.join(root, "programs", "hello.asm"), "-o", helloBin], root);
   await exec("nasm", ["-fbin", path.join(root, "programs", "ticker.asm"), "-o", path.join(buildDir, "ticker.bin")], root);
   await exec("nasm", ["-fbin", path.join(root, "programs", "pulse.asm"), "-o", path.join(buildDir, "pulse.bin")], root);
+  await exec("nasm", ["-fbin", path.join(root, "programs", "crashy.asm"), "-o", path.join(buildDir, "crashy.bin")], root);
   const startObj = path.join(buildDir, "start.o");
   await exec("nasm", ["-felf64", path.join(root, "programs", "start.s"), "-o", startObj], root);
   await exec("gcc", [...progCc, "-c", path.join(root, "programs", "runtime.c"), "-o", runtimeObj], root);
