@@ -120,6 +120,7 @@ export async function buildImage(): Promise<ImagePaths> {
   const diskObj = path.join(buildDir, "disk.o");
   const linkObj = path.join(buildDir, "link.o");
   const taskObj = path.join(buildDir, "task.o");
+  const userObj = path.join(buildDir, "user.o");
   const editorObj = path.join(buildDir, "editor.o");
   const pkgObj = path.join(buildDir, "pkg.o");
   const mbrBin = path.join(buildDir, "mbr.bin");
@@ -239,6 +240,8 @@ export async function buildImage(): Promise<ImagePaths> {
 
   await compileKernel("task.c", taskObj);
 
+  await compileKernel("user.c", userObj);
+
   await compileKernel("editor.c", editorObj);
 
   await compileKernel("pkg.c", pkgObj);
@@ -264,6 +267,7 @@ export async function buildImage(): Promise<ImagePaths> {
     diskObj,
     linkObj,
     taskObj,
+    userObj,
     editorObj,
     pkgObj,
     mbrObj,

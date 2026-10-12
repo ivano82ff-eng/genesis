@@ -2907,6 +2907,19 @@ static volatile int clock_due;
 
 extern void isr_irq0(void);
 
+void idt_gate(int number, void *handler, unsigned char attr, unsigned char ist) {
+    unsigned long addr = (unsigned long)handler;
+    idt[number].offset_low = (unsigned short)addr;
+    idt[number].selector = 0x08;
+    idt[number].ist = ist;
+    idt[number].type_attr = attr;
+    idt[number].offset_mid = (unsigned short)(addr >> 16);
+    idt[number].offset_high = (unsigned int)(addr >> 32);
+    idt[number].zero = 0;
+}
+
+void user_init(void);
+
 static void set_gate(int number, void *handler) {
     unsigned long addr = (unsigned long)handler;
     idt[number].offset_low = (unsigned short)addr;
@@ -3118,6 +3131,7 @@ void timer_start(void) {
         idt[i].type_attr = 0;
     }
     set_gate(32, isr_irq0);
+    user_init(); /* GDT user segments, TSS, exceptions, int 0x80 */
     struct idt_ptr pointer = {
         (unsigned short)(sizeof idt - 1),
         (unsigned long)idt,

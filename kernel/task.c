@@ -1,15 +1,12 @@
-/* Kernel tasks: fixed slots, own stacks, round-robin on the PIT IRQ.
- * Task 0 is the boot thread (shell loop). Everything runs in ring 0. */
+/* Tasks: fixed slots, own kernel stacks, round-robin on the PIT IRQ.
+ * Task 0 is the boot thread (shell loop, ring 0). Programs from disk run in
+ * ring 3, each in its own address space (see user.c). */
 #include "fs_limits.h"
+#include "user.h"
 
 void console_puts(const char *text);
 void console_putc(char ch);
 
-typedef void (*print_fn)(const char *);
-typedef void (*sleep_fn)(unsigned int ticks);
-void *pkg_sym(const char *lib, const char *sym);
-typedef void *(*pkg_sym_fn)(const char *lib, const char *sym);
-typedef void (*task_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
 enum { TASK_MAX = 4, TASK_STACK = 16384, FRAME_REGS = 15 };
 enum { TASK_FREE = 0, TASK_READY, TASK_DEAD };
@@ -17,13 +14,29 @@ enum { TASK_FREE = 0, TASK_READY, TASK_DEAD };
 struct task {
     unsigned long rsp;
     int state;
-    task_fn entry;
     unsigned int ticks;
+    unsigned long cr3; /* user address space, 0 for kernel tasks */
+    int quiet;         /* foreground program: no "task N done" line */
     char name[FS_NAME];
 };
 
+void task_crash_note(int id, const char *name, const char *why);
+static void print_u(unsigned int value);
+
 static struct task tasks[TASK_MAX] = {[0] = {.state = TASK_READY, .name = "shell"}};
 static unsigned char stacks[TASK_MAX][TASK_STACK] __attribute__((aligned(16)));
+/* FPU/SSE registers of each task, swapped on every task switch. */
+static unsigned char fpu[TASK_MAX][512] __attribute__((aligned(16)));
+
+static void fpu_reset(int id) {
+    for (int i = 0; i < 512; i++) {
+        fpu[id][i] = 0;
+    }
+    fpu[id][0] = 0x7f; /* FCW 0x037f */
+    fpu[id][1] = 0x03;
+    fpu[id][24] = 0x80; /* MXCSR 0x1f80 */
+    fpu[id][25] = 0x1f;
+}
 static volatile int current;
 static volatile unsigned int jiffies;
 
@@ -67,6 +80,17 @@ unsigned long task_switch(unsigned long rsp) {
     if (next != prev && tasks[prev].state == TASK_DEAD) {
         tasks[prev].state = TASK_FREE;
     }
+    if (next != prev) {
+        __asm__ volatile("fxsave64 %0" : "=m"(fpu[prev]));
+        __asm__ volatile("fxrstor64 %0" ::"m"(fpu[next]));
+        unsigned long want = tasks[next].cr3 != 0 ? tasks[next].cr3 : user_kernel_cr3();
+        unsigned long have;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(have));
+        if (want != have) {
+            __asm__ volatile("mov %0, %%cr3" ::"r"(want) : "memory");
+        }
+        user_set_kstack((unsigned long)(stacks[next] + TASK_STACK));
+    }
     return tasks[next].rsp;
 }
 
@@ -82,24 +106,19 @@ static void print_u(unsigned int value) {
     }
 }
 
-static __attribute__((noreturn)) void task_start(void) {
-    int self = current;
-    tasks[self].entry(console_puts, task_sleep, pkg_sym);
-    console_puts("\ntask ");
-    print_u((unsigned int)self);
-    console_puts(" done\n");
-    unsigned long flags;
-    irq_off(&flags);
-    tasks[self].state = TASK_DEAD;
-    __asm__ volatile("sti" ::: "memory");
-    for (;;) {
-        __asm__ volatile("hlt");
+/* Release the address space of task ID (interrupts off, not running on it). */
+static void task_release(int id) {
+    if (tasks[id].cr3 != 0) {
+        user_libs_forget(tasks[id].cr3);
+        user_space_free(tasks[id].cr3);
+        tasks[id].cr3 = 0;
     }
 }
 
-/* Returns the task id, or -1 when every slot is busy. */
-int task_spawn(const char *name, void *code) {
-    task_fn entry = (task_fn)code;
+/* Start a program image in ring 3. Returns the task id, -1 when every slot is
+ * busy, -2 when there is no memory for its address space. */
+int task_spawn_user(const char *name, const unsigned char *image, unsigned int len,
+                    const char *args, int quiet) {
     unsigned long flags;
     irq_off(&flags);
     int id = -1;
@@ -113,19 +132,27 @@ int task_spawn(const char *name, void *code) {
         irq_restore(flags);
         return -1;
     }
-    unsigned short cs;
-    unsigned short ss;
-    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
-    __asm__ volatile("mov %%ss, %0" : "=r"(ss));
+    fpu_reset(id);
+    struct user_start st;
+    unsigned long cr3 = user_space_new(image, len, args, &st);
+    if (cr3 == 0) {
+        irq_restore(flags);
+        return -2;
+    }
     unsigned long *top = (unsigned long *)(stacks[id] + TASK_STACK);
-    /* iretq frame; the entry sees rsp % 16 == 8, as after a call. */
-    *--top = ss;
-    *--top = (unsigned long)(stacks[id] + TASK_STACK - 8);
+    *--top = USER_SS;
+    *--top = st.rsp;
     *--top = 0x202;
-    *--top = cs;
-    *--top = (unsigned long)task_start;
-    for (int i = 0; i < FRAME_REGS; i++) {
-        *--top = 0;
+    *--top = USER_CS;
+    *--top = st.rip;
+    /* r15 .. rax as isr_irq0 pops them; rdi/rsi/rdx/rcx carry the arguments. */
+    unsigned long regs[FRAME_REGS] = {0};
+    regs[9] = st.print;  /* rdi */
+    regs[10] = st.sleep; /* rsi */
+    regs[11] = st.sym;   /* rdx */
+    regs[12] = st.args;  /* rcx */
+    for (int i = FRAME_REGS - 1; i >= 0; i--) {
+        *--top = regs[i];
     }
     struct task *task = &tasks[id];
     unsigned int n = 0;
@@ -134,12 +161,44 @@ int task_spawn(const char *name, void *code) {
         n++;
     }
     task->name[n] = 0;
-    task->entry = entry;
     task->ticks = 0;
+    task->cr3 = cr3;
+    task->quiet = quiet;
     task->rsp = (unsigned long)top;
     task->state = TASK_READY;
     irq_restore(flags);
     return id;
+}
+
+const char *task_current_name(void) {
+    return tasks[current].name;
+}
+
+/* 1 while task ID still runs. */
+int task_alive(int id) {
+    return id > 0 && id < TASK_MAX && tasks[id].state == TASK_READY;
+}
+
+/* The current user task ends: normally (WHY == 0) or because of a fault.
+ * Runs on the task's kernel stack inside a trap; never returns. */
+void task_user_died(const char *why) {
+    __asm__ volatile("cli" ::: "memory");
+    int self = current;
+    __asm__ volatile("mov %0, %%cr3" ::"r"(user_kernel_cr3()) : "memory");
+    task_release(self);
+    if (why != 0) {
+        task_crash_note(self, tasks[self].name, why);
+    } else if (!tasks[self].quiet) {
+        console_puts("\ntask ");
+        print_u((unsigned int)self);
+        console_puts(" done\n");
+    }
+    __asm__ volatile("cli" ::: "memory");
+    tasks[self].state = TASK_DEAD;
+    __asm__ volatile("sti" ::: "memory");
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
 }
 
 void cmd_ps(void) {
@@ -202,6 +261,9 @@ int task_kill(int id) {
     if (ok) {
         /* Never the running task: kill comes from the shell (task 0). */
         tasks[id].state = id == current ? TASK_DEAD : TASK_FREE;
+        if (id != current) {
+            task_release(id);
+        }
     }
     irq_restore(flags);
     return ok;
