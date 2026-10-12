@@ -60,7 +60,7 @@ test(
       await typeLine(files, "desktop");
       await files.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await click(files, CELL.files.x, CELL.files.y);
-      await files.waitForSerial("ls: ", DEFAULT_TIMEOUT_MS);
+      await files.waitForSerial("\nls: ", DEFAULT_TIMEOUT_MS);
       assert.match(files.serial, /readme/);
       assert.match(files.serial, /Назад/);
       // /home: row 0 is "..", row 1 is readme.

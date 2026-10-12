@@ -52,6 +52,8 @@ export async function click(guest: Guest, x: number, y: number): Promise<void> {
     await guest.monitor("mouse_button 1");
     await delay(80);
     await guest.monitor("mouse_button 0");
+    // cells open on release: give the guest a moment before the caller looks
+    await delay(250);
   } catch {
     // the guest may keep QMP busy or close it (poweroff) before the reply
   }
