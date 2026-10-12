@@ -263,6 +263,45 @@ async function main() {
     typer.focus();
   });
 
+  /* paste: host clipboard text -> keystrokes (newlines, tabs, Cyrillic kept) */
+  let pasting = Promise.resolve();
+  const pasteText = (text) => {
+    const chars = [...text.replace(/\r\n?/g, "\n")];
+    pasting = pasting.then(async () => {
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        if (ch === "\n") press(emu, SC.enter);
+        else if (ch === "\t") press(emu, SC.tab);
+        else if (ch >= " " || ch > "\x7f") sendChar(ch);
+        if (i % 12 === 11) await new Promise((r) => setTimeout(r, 60)); // the guest keyboard ring is small
+      }
+    });
+    return pasting;
+  };
+  window.genesisPaste = pasteText;
+  document.addEventListener("paste", (e) => {
+    const text = e.clipboardData?.getData("text/plain");
+    if (!text) return;
+    e.preventDefault();
+    pasteText(text);
+    if (document.activeElement === typer) resetTyper();
+  });
+  /* Ctrl+V / Shift+Insert belong to the browser (host clipboard), not the guest */
+  addEventListener("keydown", (e) => {
+    if ((e.ctrlKey && (e.key === "v" || e.key === "V" || e.code === "KeyV")) || (e.shiftKey && e.key === "Insert")) {
+      e.stopImmediatePropagation();
+    }
+  }, true);
+  $("btn_paste").addEventListener("click", async () => {
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = prompt("Вставьте текст сюда (долгое нажатие → Вставить):") || "";
+    }
+    if (text) pasteText(text);
+  });
+
   /* fullscreen */
   $("btn_full").addEventListener("click", () => {
     if (document.fullscreenElement) document.exitFullscreen();

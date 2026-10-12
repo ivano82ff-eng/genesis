@@ -49,6 +49,17 @@ static int dirty;
 static int quit_armed;
 static int lang;
 static const char *note = "";
+static int sel = -1; /* selection anchor (byte offset), -1 = none */
+
+/* Internal clipboard, shared with the shell's ^V. */
+enum { CLIP_MAX = 16384 };
+static char clip[CLIP_MAX];
+static unsigned int clip_len;
+
+const char *clipboard_text(unsigned int *length) {
+    *length = clip_len;
+    return clip;
+}
 
 int editor_active(void) {
     return active;
@@ -263,6 +274,12 @@ static void render(void) {
                 if (k < n) {
                     unsigned int cp;
                     int a = k < span ? attr[k] : C_TEXT;
+                    if (sel >= 0) {
+                        unsigned int abs = at + (unsigned int)k;
+                        unsigned int lo = (unsigned int)sel < cur ? (unsigned int)sel : cur;
+                        unsigned int hi = (unsigned int)sel < cur ? cur : (unsigned int)sel;
+                        if (abs >= lo && abs < hi) a = 0x70; /* selected: black on grey */
+                    }
                     k += utf8_decode((const unsigned char *)buf + at + k, (unsigned int)(n - k), &cp);
                     put(row, GUTTER + c, (char)vga_cell(cp), (unsigned char)a);
                 } else {
@@ -287,7 +304,7 @@ static void render(void) {
     k += num_str(status + k, (unsigned int)cline + 1);
     status[k++] = ':';
     k += num_str(status + k, (unsigned int)ccol + 1);
-    const char *tail = kbd_layout_ru() ? "  RU  ^S save  ^Q/Esc quit  " : "  EN  ^S save  ^Q/Esc quit  ";
+    const char *tail = kbd_layout_ru() ? "  RU  ^S save ^C ^X ^V  ^Q/Esc quit  " : "  EN  ^S save ^C ^X ^V  ^Q/Esc quit  ";
     for (const char *s = tail; *s && k < COLS; s++) status[k++] = *s;
     for (const char *s = note; *s && k < COLS; s++) status[k++] = *s;
     while (k < COLS) status[k++] = ' ';
@@ -368,9 +385,80 @@ static void close_editor(void) {
     editor_closed();
 }
 
+static void sel_range(unsigned int *lo, unsigned int *hi) {
+    if (sel >= 0 && (unsigned int)sel != cur) {
+        *lo = (unsigned int)sel < cur ? (unsigned int)sel : cur;
+        *hi = (unsigned int)sel < cur ? cur : (unsigned int)sel;
+    } else { /* no selection: the whole current line with its newline */
+        *lo = line_start(cur);
+        *hi = line_end(cur);
+        if (*hi < len) (*hi)++;
+    }
+}
+
+static void copy_range(unsigned int lo, unsigned int hi) {
+    clip_len = hi - lo < CLIP_MAX ? hi - lo : CLIP_MAX;
+    for (unsigned int i = 0; i < clip_len; i++) clip[i] = buf[lo + i];
+}
+
+static void delete_range(unsigned int lo, unsigned int hi) {
+    unsigned int n = hi - lo;
+    for (unsigned int i = lo; i + n < len; i++) buf[i] = buf[i + n];
+    len -= n;
+    cur = lo;
+    dirty = 1;
+}
+
 void editor_key(int key) {
     if (!active) return;
     note = "";
+    int shifted = (key & ED_SHIFT) != 0;
+    key &= ~ED_SHIFT;
+    int moving = key == ED_LEFT || key == ED_RIGHT || key == ED_UP || key == ED_DOWN || key == ED_HOME ||
+                 key == ED_END || key == ED_PGUP || key == ED_PGDN;
+    if (moving && shifted && sel < 0) sel = (int)cur;
+    if (moving && !shifted) sel = -1;
+    if (key == ED_COPY || key == ED_CUT) {
+        unsigned int lo, hi;
+        sel_range(&lo, &hi);
+        copy_range(lo, hi);
+        if (key == ED_CUT) delete_range(lo, hi);
+        sel = -1;
+        note = key == ED_CUT ? "cut" : "copied";
+        console_puts(key == ED_CUT ? "edit: cut\n" : "edit: copied\n");
+        render();
+        return;
+    }
+    if (key == ED_PASTE) {
+        if (sel >= 0 && (unsigned int)sel != cur) {
+            unsigned int lo, hi;
+            sel_range(&lo, &hi);
+            delete_range(lo, hi);
+        }
+        sel = -1;
+        for (unsigned int i = 0; i < clip_len; i++) insert(clip[i]);
+        note = "pasted";
+        console_puts("edit: pasted\n");
+        render();
+        return;
+    }
+    if (!moving && sel >= 0) {
+        /* typing or deleting over a selection replaces it */
+        if ((key == '\b' || key == ED_DELETE) && (unsigned int)sel != cur) {
+            unsigned int lo, hi;
+            sel_range(&lo, &hi);
+            delete_range(lo, hi);
+            sel = -1;
+            render();
+            return;
+        }
+        if (key != ED_SAVE && key != ED_REDRAW && key != ED_QUIT && (unsigned int)sel != cur) {
+            unsigned int lo, hi;
+            sel_range(&lo, &hi);
+            delete_range(lo, hi);
+        }
+        if (key != ED_SAVE && key != ED_REDRAW) sel = -1;
+    }
     if (key != ED_QUIT) quit_armed = 0;
     if (key != ED_UP && key != ED_DOWN && key != ED_PGUP && key != ED_PGDN) want_col = -1;
     switch (key) {
@@ -437,6 +525,7 @@ void editor_key(int key) {
 }
 
 int editor_open(const char *file) {
+    sel = -1;
     int n = 0;
     while (file[n] == ' ') file++;
     while (file[n] && file[n] != ' ' && n + 1 < FS_NAME) {

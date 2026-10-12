@@ -520,7 +520,7 @@ static void nav_scancode(unsigned char b) {
         default: break;
         }
         if (key != 0) {
-            editor_key(key);
+            editor_key(key | (kbd_shift && key != ED_DELETE ? ED_SHIFT : 0)); /* Shift+arrows select */
         }
         return;
     }
@@ -626,8 +626,25 @@ static void ps2_apply(void) {
         if (ch == 0) {
             continue;
         }
+        if (!editor_active() && kbd_ctrl && (ch == 'v' || ch == 'V')) {
+            /* ^V in the shell or the command bar: the internal clipboard */
+            unsigned int clen = 0;
+            const char *ctext = clipboard_text(&clen);
+            for (unsigned int k = 0; k < clen; k++) {
+                if (ctext[k] != '\n' || k + 1 < clen) {
+                    deliver(ctext[k] == '\t' ? ' ' : ctext[k]);
+                }
+            }
+            continue;
+        }
         if (editor_active() && kbd_ctrl) {
-            if (ch == 's' || ch == 'S') {
+            if (ch == 'c' || ch == 'C') {
+                editor_key(ED_COPY);
+            } else if (ch == 'x' || ch == 'X') {
+                editor_key(ED_CUT);
+            } else if (ch == 'v' || ch == 'V') {
+                editor_key(ED_PASTE);
+            } else if (ch == 's' || ch == 'S') {
                 editor_key(ED_SAVE);
             } else if (ch == 'q' || ch == 'Q') {
                 editor_key(ED_QUIT);
