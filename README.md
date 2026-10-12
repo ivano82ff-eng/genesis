@@ -73,7 +73,7 @@ ticker &
 
 ```
 npm run web           # build/i686/genesis.iso -> web/, плюс v86 и BIOS в web/v86/
-npm run test:i686     # часть тестов на qemu-system-i386
+npm run test:i686     # все тесты на qemu-system-i386 (32-битная сборка)
 node dist/src/cli.js show --arch i686   # 32-битный образ в окне QEMU
 ```
 

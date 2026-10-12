@@ -31,8 +31,8 @@ jobs:
       - run: npm ci
       - name: i686 image + v86
         run: npm run web
-      - name: i686 tests in qemu-system-i386
-        run: npm run test:i686
+      - name: quick i686 checks in qemu-system-i386 (the full suite runs in ci.yml)
+        run: GENESIS_ARCH=i686 node --test --test-concurrency=1 --test-timeout 120000 dist/test/boot.test.js dist/test/pkg.test.js dist/test/memprotect.test.js
       - name: smoke test in headless Chromium
         run: |
           npm install --no-save playwright@1.48.2
