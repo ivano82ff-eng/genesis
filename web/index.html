@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0f1a">
+<title>genesis</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="screen_container">
+  <div id="text_screen"></div>
+  <canvas id="vga"></canvas>
+</div>
+
+<div id="loading">
+  <div class="core"></div>
+  <div id="loading_text">Загрузка genesis…</div>
+  <div id="loading_bar"><div></div></div>
+  <div id="loading_hint">Система запускается внутри браузера, первый раз это занимает до минуты.</div>
+</div>
+
+<div id="toolbar">
+  <button id="btn_keys" title="Кнопки для телефона и пульта">🎮</button>
+  <button id="btn_type" title="Клавиатура">⌨</button>
+  <button id="btn_full" title="Во весь экран">⛶</button>
+</div>
+
+<div id="pad" hidden>
+  <div class="dpad">
+    <button data-key="up" class="up">▲</button>
+    <button data-key="left" class="left">◀</button>
+    <button data-key="enter" class="ok">OK</button>
+    <button data-key="right" class="right">▶</button>
+    <button data-key="down" class="down">▼</button>
+  </div>
+  <div class="keys">
+    <button data-key="esc">Esc</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="backspace">⌫</button>
+    <button data-key="layout">RU/EN</button>
+  </div>
+</div>
+
+<input id="typer" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Ввод текста">
+
+<script src="v86/libv86.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -5,3 +5,5 @@ build/
 import/*
 !import/.gitkeep
 !import/README.md
+web/v86/
+web/genesis.iso
