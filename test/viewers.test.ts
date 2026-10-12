@@ -95,10 +95,16 @@ test(
       await mp4.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(mp4, 6, "mp4: play");
       await mp4.waitForSerial("mp4: frame", DEFAULT_TIMEOUT_MS);
+      // The picture changes (it plays) and the machine does not reboot: the
+      // video's SSE code used to fault it, which also "changed" the screen.
       const first = await mp4.screendump();
-      await delay(400);
-      const second = await mp4.screendump();
-      assert.equal(first.equals(second), false);
+      let moved = false;
+      for (let i = 0; i < 20 && !moved; i++) {
+        await delay(400);
+        moved = !first.equals(await mp4.screendump());
+      }
+      assert.equal(moved, true, "the video plays");
+      assert.equal(mp4.serial.split("kernel booted").length, 2, "mp4 перезагрузил машину");
     } finally {
       await mp4.stop();
     }

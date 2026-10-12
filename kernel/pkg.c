@@ -3,7 +3,8 @@
  * there is no TCP/IP, so "download" means copying from that repository onto
  * Grid Store. Libraries are position-independent flat binaries that start
  * with "GLIB" and a jump to `void *lookup(const char *sym, pkg_sym_fn import)`.
- * Programs get pkg_sym as their third argument and resolve symbols at run time. */
+ * Programs get `sym` as their third argument; it maps the library into the
+ * program's own address space (user.c) and runs its lookup in ring 3. */
 #include "fs_limits.h"
 
 void console_puts(const char *text);
@@ -12,7 +13,6 @@ int fs_get(const char *name, const unsigned char **data, unsigned int *length);
 int fs_put(const char *name, const char *data, unsigned int length);
 int fs_delete(const char *name);
 int fs_free_slots(void);
-void *kheap_alloc(unsigned int size);
 
 extern const unsigned char pkg_repo[];
 extern const unsigned char pkg_repo_end[];
@@ -20,7 +20,7 @@ extern const unsigned char pkg_repo_end[];
 typedef void *(*pkg_sym_fn)(const char *lib, const char *sym);
 typedef void *(*lib_lookup_fn)(const char *sym, pkg_sym_fn import);
 
-enum { LINE_CAP = 160, TOK_MAX = 6, DEPTH_MAX = 8, CACHE_MAX = 8 };
+enum { LINE_CAP = 160, TOK_MAX = 6, DEPTH_MAX = 8 };
 
 /* Installed files live in /lib (GLIB libraries) and /bin (programs). */
 static void pkg_path(char *out, const char *dir, const char *name) {
@@ -38,6 +38,15 @@ static int pkg_lib(const char *name, const unsigned char **data, unsigned int *l
     char p[FS_NAME];
     pkg_path(p, "/lib/", name);
     return fs_get(p, data, length);
+}
+
+/* An installed library blob (starts with GLIB) for mapping into a task. */
+int pkg_lib_blob(const char *name, const unsigned char **data, unsigned int *length) {
+    if (!pkg_lib(name, data, length) || *length < 6) {
+        return 0;
+    }
+    const unsigned char *d = *data;
+    return d[0] == 'G' && d[1] == 'L' && d[2] == 'I' && d[3] == 'B';
 }
 
 static int pkg_get(const char *name, const unsigned char **data, unsigned int *length) {
@@ -370,7 +379,6 @@ static int dep_is_target(const char *dep, int depth) {
     return 1;
 }
 
-static void cache_drop(const char *name);
 
 static void pkg_remove(const char *name) {
     if (!pkg_exists(name) || pkg_missing(name) > 0) {
@@ -405,7 +413,6 @@ static void pkg_remove(const char *name) {
     while (next_line(&pos, buf, t, &c)) {
         if (c >= 5 && t[0][0] == 'F' && s_eq(t[1], name)) {
             pkg_del(t[2]);
-            cache_drop(t[2]);
         }
     }
     console_puts("pkg: removed ");
@@ -436,67 +443,6 @@ void cmd_pkg(const char *args) {
         return;
     }
     console_puts("pkg: list | installed | install NAME | remove NAME\n");
-}
-
-/* Runtime linking. Loaded libraries are cached by name; the cache entry is
- * dropped as soon as the file is gone from Grid Store. */
-static struct {
-    char name[FS_NAME];
-    const unsigned char *src;
-    unsigned char *code;
-} cache[CACHE_MAX];
-
-static void cache_drop(const char *name) {
-    for (int i = 0; i < CACHE_MAX; i++) {
-        if (cache[i].code != 0 && s_eq(cache[i].name, name)) {
-            cache[i].code = 0;
-        }
-    }
-}
-
-void link_note(const char *lib);
-
-void *pkg_sym(const char *lib, const char *sym) {
-    const unsigned char *data;
-    unsigned int length;
-    if (lib == 0 || sym == 0 || !pkg_lib(lib, &data, &length)) {
-        if (lib != 0) {
-            cache_drop(lib);
-        }
-        return 0;
-    }
-    if (length < 6 || data[0] != 'G' || data[1] != 'L' || data[2] != 'I' || data[3] != 'B') {
-        return 0;
-    }
-    unsigned char *code = 0;
-    int slot = -1;
-    for (int i = 0; i < CACHE_MAX; i++) {
-        if (cache[i].code != 0 && s_eq(cache[i].name, lib) && cache[i].src == data) {
-            code = cache[i].code;
-        } else if (cache[i].code == 0 && slot < 0) {
-            slot = i;
-        }
-    }
-    if (code == 0) {
-        code = kheap_alloc(length);
-        if (code == 0) {
-            return 0;
-        }
-        for (unsigned int i = 0; i < length; i++) {
-            code[i] = data[i];
-        }
-        if (slot >= 0) {
-            s_copy(cache[slot].name, lib, FS_NAME);
-            cache[slot].src = data;
-            cache[slot].code = code;
-        }
-    }
-    lib_lookup_fn lookup = (lib_lookup_fn)(void *)(code + 4);
-    void *found = lookup(sym, pkg_sym);
-    if (found != 0) {
-        link_note(lib);
-    }
-    return found;
 }
 
 /* For the desktop: the INDEX-th package, whether it is installed and

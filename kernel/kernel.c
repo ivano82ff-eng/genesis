@@ -40,7 +40,6 @@ int link_ping(void);
 int link_send_file(const char *name, const unsigned char *data, unsigned int length);
 void timer_start(void);
 int task_current(void);
-int task_spawn(const char *name, void *code);
 void task_sleep(unsigned int ticks);
 void cmd_ps(void);
 
@@ -694,6 +693,7 @@ static void serial_puts(const char *text) {
     }
 }
 
+static volatile int fg_task = -1; /* the foreground program's task */
 static char program_text[64];
 static int program_len = 0;
 static int program_capture = 0;
@@ -709,7 +709,7 @@ static unsigned int desk_cap_len;
 static int desk_cap_on;
 
 void console_putc(char ch) {
-    if (cap_on && task_current() == 0) {
+    if (cap_on && (task_current() == 0 || task_current() == fg_task)) {
         /* Shell pipe or redirect: collect output instead of printing it. */
         if (cap_len < SH_OUT) {
             cap_buf[cap_len++] = ch;
@@ -893,10 +893,18 @@ void *kheap_alloc(unsigned int size) {
     return heap_alloc(size);
 }
 
+unsigned int user_pages_used(void);
+unsigned int user_pages_total(void);
+
 static void cmd_mem(void) {
     console_puts("usable ");
     print_u32((unsigned int)(usable_bytes >> 20));
     console_puts(" MiB\n");
+    console_puts("user pages ");
+    print_u32(user_pages_used());
+    console_putc('/');
+    print_u32(user_pages_total());
+    console_putc('\n');
     if (mem_map_count == 0) {
         console_puts("map: none\n");
         return;
@@ -1347,6 +1355,8 @@ extern const unsigned char ticker_bin[];
 extern const unsigned char ticker_bin_end[];
 extern const unsigned char pulse_bin[];
 extern const unsigned char pulse_bin_end[];
+extern const unsigned char crashy_bin[];
+extern const unsigned char crashy_bin_end[];
 extern const unsigned char open_bin[];
 extern const unsigned char open_bin_end[];
 extern const unsigned char vtxt_bin[];
@@ -1400,6 +1410,7 @@ static void fs_seed(void) {
     fs_seed_blob("/bin/vmp4", vmp4_bin, vmp4_bin_end);
     fs_seed_blob("/bin/ticker", ticker_bin, ticker_bin_end);
     fs_seed_blob("/bin/pulse", pulse_bin, pulse_bin_end);
+    fs_seed_blob("/bin/crashy", crashy_bin, crashy_bin_end);
     fs_seed_blob("/docs/note.txt", sample_note_txt, sample_note_txt_end);
     fs_seed_blob("/docs/note.docx", sample_note_docx, sample_note_docx_end);
     fs_seed_blob("/docs/pic.png", sample_pic_png, sample_pic_png_end);
@@ -1411,7 +1422,7 @@ static void fs_seed(void) {
 /* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
 int fs_builtin_name(const char *name) {
     static const char *const names[] = {"readme", "hello", "open", "vtxt", "vdocx", "vimg", "vpdf",
-                                        "vmp4", "ticker", "pulse", "note.txt", "note.docx", "pic.png",
+                                        "vmp4", "ticker", "pulse", "crashy", "note.txt", "note.docx", "pic.png",
                                         "pic.jpg", "note.pdf", "clip.mp4"};
     for (unsigned int i = 0; i < sizeof names / sizeof names[0]; i++) {
         if (str_eq(name, names[i])) {
@@ -1772,7 +1783,6 @@ static struct ram_file *fs_find_prog(const char *name) {
 typedef void (*print_fn)(const char *);
 typedef void (*sleep_fn)(unsigned int ticks);
 typedef void *(*pkg_sym_fn)(const char *lib, const char *sym);
-void *pkg_sym(const char *lib, const char *sym);
 void cmd_pkg(const char *args);
 typedef void (*prog_fn)(print_fn print, sleep_fn sleep, pkg_sym_fn sym);
 
@@ -1810,31 +1820,92 @@ void link_file_received(const char *name, const unsigned char *data, unsigned in
 
 static const char *run_prog; /* the foreground program, while it runs */
 
-/* pkg_sym resolved a library symbol: light the program -> library link. */
-void link_note(const char *lib) {
-    desktop_link(run_prog != 0 ? run_prog : "?", lib);
+int task_spawn_user(const char *name, const unsigned char *image, unsigned int len,
+                    const char *args, int quiet);
+int task_alive(int id);
+
+/* A user task was stopped by a fault: say so now, tell the desktop later
+ * (journal + red core) from the shell loop, see task_crash_take. */
+static char crash_pending[128];
+static volatile int crash_due;
+
+void task_crash_note(int id, const char *name, const char *why) {
+    console_puts("\ntask ");
+    print_u32((unsigned int)id);
+    console_puts(" (");
+    console_puts(name);
+    console_puts("): ");
+    console_puts(why);
+    console_puts(" - task stopped, system OK\n");
+    unsigned int n = 0;
+    for (const char *c = name; *c != 0 && n + 3 < sizeof crash_pending; c++) {
+        crash_pending[n++] = *c;
+    }
+    crash_pending[n++] = ':';
+    crash_pending[n++] = ' ';
+    for (const char *c = why; *c != 0 && n + 1 < sizeof crash_pending; c++) {
+        crash_pending[n++] = *c;
+    }
+    crash_pending[n] = 0;
+    crash_due = 1;
 }
 
-static void cmd_run(const char *name, int background) {
+/* For the desktop: copies the last crash text once; 0 if none is new. */
+int task_crash_take(char *out, unsigned int cap) {
+    if (!crash_due) {
+        return 0;
+    }
+    unsigned long flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags)::"memory");
+    unsigned int n = 0;
+    while (crash_pending[n] != 0 && n + 1 < cap) {
+        out[n] = crash_pending[n];
+        n++;
+    }
+    out[n] = 0;
+    crash_due = 0;
+    if (flags & 0x200ul) {
+        __asm__ volatile("sti" ::: "memory");
+    }
+    return 1;
+}
+
+/* `run NAME [ARGS]` / `spawn NAME [ARGS]`: the program runs in ring 3 in its
+ * own address space; a crash stops only that task. `run` waits for it. */
+static void cmd_run(const char *line, int background) {
+    char name[FS_NAME];
+    unsigned int n = 0;
+    while (*line == ' ') {
+        line++;
+    }
+    while (line[n] != 0 && line[n] != ' ' && n + 1 < FS_NAME) {
+        name[n] = line[n];
+        n++;
+    }
+    name[n] = 0;
+    const char *args = line + n;
+    while (*args != 0 && *args != ' ') {
+        args++;
+    }
+    while (*args == ' ') {
+        args++;
+    }
     struct ram_file *file = fs_find_prog(name);
     if (file == 0) {
         console_puts("run: no such file\n");
         return;
     }
-    unsigned char *dest = heap_alloc(file->length == 0 ? 1u : file->length);
-    if (dest == 0) {
+    timer_start(); /* the desktop may run a program while still booting */
+    int id = task_spawn_user(name, (const unsigned char *)file->data, file->length, args, !background);
+    if (id == -2) {
         console_puts("run: no memory\n");
         return;
     }
-    for (unsigned int i = 0; i < file->length; i++) {
-        dest[i] = (unsigned char)file->data[i];
+    if (id < 0) {
+        console_puts("spawn: too many tasks\n");
+        return;
     }
     if (background) {
-        int id = task_spawn(name, dest);
-        if (id < 0) {
-            console_puts("spawn: too many tasks\n");
-            return;
-        }
         console_puts("spawn: task ");
         print_u32((unsigned int)id);
         console_putc('\n');
@@ -1843,12 +1914,13 @@ static void cmd_run(const char *name, int background) {
     program_len = 0;
     program_text[0] = 0;
     program_capture = 1;
-    /* Programs are machine code run in ring 0: no isolation, a bad program
-     * can hang the whole kernel. Fine for a demo, not a userspace. */
-    prog_fn program = (prog_fn)(void *)dest;
     run_prog = name;
     desktop_link(name, "core"); /* a running program is tied to the core */
-    program(console_puts, task_sleep, pkg_sym);
+    fg_task = id;
+    while (task_alive(id)) {
+        __asm__ volatile("hlt");
+    }
+    fg_task = -1;
     run_prog = 0;
     program_capture = 0;
     console_putc('\n');
@@ -2192,7 +2264,8 @@ extern unsigned char kernel_load_end[];
 /* Memory in use, in bytes: the loaded kernel (code, data, bss with the
  * framebuffer back-buffers and task stacks) plus the heap. */
 unsigned long mem_used_bytes(void) {
-    return (unsigned long)(kernel_load_end - kernel_load_start) + heap_used;
+    return (unsigned long)(kernel_load_end - kernel_load_start) + heap_used +
+           (unsigned long)user_pages_used() * 4096ul;
 }
 
 /* Used share of the usable RAM from the Multiboot map, rounded up so that
@@ -3033,10 +3106,18 @@ static void sh_statement(struct sh_tok *t, int n, int background) {
     if (background) {
         /* `ticker &` or `run ticker &`: a program from disk as a task. */
         char **a = argv[0];
-        if (stages == 1 && redir == 0 && argc[0] == 1) {
-            cmd_run(a[0], 1);
-        } else if (stages == 1 && redir == 0 && argc[0] == 2 && (str_eq(a[0], "run") || str_eq(a[0], "spawn"))) {
-            cmd_run(a[1], 1);
+        int skip = argc[0] >= 2 && (str_eq(a[0], "run") || str_eq(a[0], "spawn"));
+        if (stages == 1 && redir == 0 && argc[0] > skip) {
+            char line[96];
+            unsigned int n = 0;
+            for (int w = skip; w < argc[0]; w++) {
+                for (const char *c = a[w]; *c != 0 && n + 2 < sizeof line; c++) {
+                    line[n++] = *c;
+                }
+                line[n++] = ' ';
+            }
+            line[n] = 0;
+            cmd_run(line, 1);
         } else {
             console_puts("sh: only a program can run with &\n");
         }

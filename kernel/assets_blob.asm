@@ -19,6 +19,12 @@ pulse_bin:
 incbin "build/pulse.bin"
 pulse_bin_end:
 
+global crashy_bin
+global crashy_bin_end
+crashy_bin:
+incbin "build/crashy.bin"
+crashy_bin_end:
+
 global open_bin
 global open_bin_end
 open_bin:

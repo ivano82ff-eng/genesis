@@ -120,6 +120,7 @@ export async function buildImage(): Promise<ImagePaths> {
   const diskObj = path.join(buildDir, "disk.o");
   const linkObj = path.join(buildDir, "link.o");
   const taskObj = path.join(buildDir, "task.o");
+  const userObj = path.join(buildDir, "user.o");
   const editorObj = path.join(buildDir, "editor.o");
   const pkgObj = path.join(buildDir, "pkg.o");
   const mbrBin = path.join(buildDir, "mbr.bin");
@@ -173,6 +174,7 @@ export async function buildImage(): Promise<ImagePaths> {
   await exec("nasm", ["-fbin", path.join(root, "programs", "hello.asm"), "-o", helloBin], root);
   await exec("nasm", ["-fbin", path.join(root, "programs", "ticker.asm"), "-o", path.join(buildDir, "ticker.bin")], root);
   await exec("nasm", ["-fbin", path.join(root, "programs", "pulse.asm"), "-o", path.join(buildDir, "pulse.bin")], root);
+  await exec("nasm", ["-fbin", path.join(root, "programs", "crashy.asm"), "-o", path.join(buildDir, "crashy.bin")], root);
   const startObj = path.join(buildDir, "start.o");
   await exec("nasm", ["-felf64", path.join(root, "programs", "start.s"), "-o", startObj], root);
   await exec("gcc", [...progCc, "-c", path.join(root, "programs", "runtime.c"), "-o", runtimeObj], root);
@@ -239,6 +241,8 @@ export async function buildImage(): Promise<ImagePaths> {
 
   await compileKernel("task.c", taskObj);
 
+  await compileKernel("user.c", userObj);
+
   await compileKernel("editor.c", editorObj);
 
   await compileKernel("pkg.c", pkgObj);
@@ -264,6 +268,7 @@ export async function buildImage(): Promise<ImagePaths> {
     diskObj,
     linkObj,
     taskObj,
+    userObj,
     editorObj,
     pkgObj,
     mbrObj,
