@@ -15,7 +15,9 @@
     "start": "tsc -p tsconfig.json && node dist/src/cli.js run",
     "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 --test-timeout 120000 dist/test/*.test.js",
     "panel": "npm --prefix panel run dev",
-    "look": "tsc -p tsconfig.json && node dist/src/cli.js show"
+    "look": "tsc -p tsconfig.json && node dist/src/cli.js show",
+    "web": "tsc -p tsconfig.json && node dist/src/cli.js build --arch i686 && cp build/i686/genesis.iso web/ && bash web/fetch-v86.sh",
+    "test:i686": "tsc -p tsconfig.json && GENESIS_ARCH=i686 node --test --test-concurrency=1 --test-timeout 120000 dist/test/boot.test.js dist/test/shell.test.js dist/test/desktop.test.js dist/test/fs.test.js dist/test/pkg.test.js dist/test/memprotect.test.js dist/test/task.test.js dist/test/core.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

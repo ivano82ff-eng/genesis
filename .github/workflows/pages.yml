@@ -1,0 +1,63 @@
+name: web
+
+# Builds the 32-bit (i686) genesis image, wraps it in the v86 web page,
+# checks that it boots to the desktop in headless Chromium and publishes
+# web/ to GitHub Pages (pushes to main only).
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y build-essential gcc-multilib nasm qemu-system-x86 grub-pc-bin grub-common xorriso mtools
+      - run: npm ci
+      - name: i686 image + v86
+        run: npm run web
+      - name: i686 tests in qemu-system-i386
+        run: npm run test:i686
+      - name: smoke test in headless Chromium
+        run: |
+          npm install --no-save playwright@1.48.2
+          npx playwright install --with-deps chromium
+          cp web/smoke.mjs ./smoke.mjs
+          node smoke.mjs web build/web-smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-smoke
+          path: build/web-smoke
+      - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          path: web
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
