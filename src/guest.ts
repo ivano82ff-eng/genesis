@@ -221,6 +221,8 @@ export async function startGuest(options: {
   diskPath?: string;
   boot?: "cd" | "disk";
   net?: { mode: "listen" | "connect"; port: number; mac: string };
+  /** QEMU user-mode networking (slirp): DHCP, DNS, the host at 10.0.2.2. */
+  usernet?: { nic?: "rtl8139" | "ne2k_pci" };
 }): Promise<Guest> {
   const qemu = options.qemuBin ?? pickQemu(options.display);
   const windowsQemu = qemu.toLowerCase().endsWith(".exe");
@@ -284,6 +286,13 @@ export async function startGuest(options: {
       `socket,id=link0,${endpoint}`,
       "-device",
       `rtl8139,netdev=link0,mac=${options.net.mac}`,
+    );
+  } else if (options.usernet) {
+    args.push(
+      "-netdev",
+      "user,id=net0",
+      "-device",
+      `${options.usernet.nic ?? "rtl8139"},netdev=net0,mac=52:54:00:12:34:56`,
     );
   } else {
     args.push("-nic", "none");

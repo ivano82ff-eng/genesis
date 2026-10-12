@@ -11,10 +11,16 @@
  * including compound assignment and ++/--, string and char literals, global
  * initializers with constants.
  * Library: printf (%d %i %u %x %c %s %%, width and 0-padding), putchar,
- * puts, malloc, free, strlen, strcmp, strcpy, memset, exit. */
+ * puts, malloc, free, strlen, strcmp, strcpy, memset, exit,
+ * tcp_connect, tcp_send, tcp_recv, tcp_close. */
 
 extern void console_putc(char ch);
 extern void console_puts(const char *text);
+/* kernel/net.c: TCP for programs */
+extern int net_tcp_connect(const char *host, unsigned int port);
+extern int tcp_send(int s, const unsigned char *data, unsigned int len);
+extern int tcp_recv(int s, unsigned char *buf, unsigned int max, unsigned int ms);
+extern void tcp_close(int s);
 
 enum { CODE_MAX = 32768, MEM_SIZE = 512 * 1024, STACK_SIZE = 64 * 1024, SYM_MAX = 1024, LOCAL_MAX = 256,
        STEP_LIMIT = 100000000 };
@@ -36,7 +42,8 @@ enum { CHAR, INT, PTR };
 enum { CNone, CFun, CSys, CGlo, CLoc };
 
 /* builtins */
-enum { S_PRINTF, S_PUTCHAR, S_PUTS, S_MALLOC, S_FREE, S_STRLEN, S_STRCMP, S_STRCPY, S_MEMSET, S_EXIT };
+enum { S_PRINTF, S_PUTCHAR, S_PUTS, S_MALLOC, S_FREE, S_STRLEN, S_STRCMP, S_STRCPY, S_MEMSET, S_EXIT,
+       S_TCP_CONNECT, S_TCP_SEND, S_TCP_RECV, S_TCP_CLOSE };
 
 struct sym {
     const char *name;
@@ -1109,6 +1116,30 @@ static int sys_call(int id, int n) {
         exit_code = a0;
         exiting = 1;
         __builtin_longjmp(jb, 1);
+    case S_TCP_CONNECT: { /* tcp_connect("host", port) -> socket or -1 */
+        char host[64];
+        int i = 0;
+        for (; i < 63 && ld8(a0 + i); i++) host[i] = (char)mem[a0 + i];
+        host[i] = 0;
+        return net_tcp_connect(host, n > 1 ? (unsigned int)args[1] : 80u);
+    }
+    case S_TCP_SEND: { /* tcp_send(s, buf, len) */
+        int b0 = n > 1 ? args[1] : 0, len = n > 2 ? args[2] : 0;
+        if (len <= 0) return 0;
+        check(b0, 1);
+        check(b0 + len - 1, 1);
+        return tcp_send(a0, mem + b0, (unsigned int)len);
+    }
+    case S_TCP_RECV: { /* tcp_recv(s, buf, max): bytes, 0 = closed, waits up to 3 s */
+        int b0 = n > 1 ? args[1] : 0, max = n > 2 ? args[2] : 0;
+        if (max <= 0) return 0;
+        check(b0, 1);
+        check(b0 + max - 1, 1);
+        return tcp_recv(a0, mem + b0, (unsigned int)max, 3000u);
+    }
+    case S_TCP_CLOSE:
+        tcp_close(a0);
+        return 0;
     default:
         fail("unknown builtin");
     }
@@ -1202,7 +1233,8 @@ int cc_run(const char *source, const char *name) {
     static const char *const kws[] = {"int", "char", "void", "if", "else", "while", "for", "do", "return",
                                       "break", "continue", "sizeof"};
     static const char *const libs[] = {"printf", "putchar", "puts", "malloc", "free", "strlen", "strcmp",
-                                       "strcpy", "memset", "exit"};
+                                       "strcpy", "memset", "exit", "tcp_connect", "tcp_send",
+                                       "tcp_recv", "tcp_close"};
     nsyms = 0;
     nlocals = 0;
     ncode = 0;

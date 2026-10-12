@@ -84,6 +84,12 @@ async function main() {
     disable_mouse: true,
     disable_speaker: true,
     autostart: true,
+    /* NE2000 card; "fetch" = v86's built-in router: DHCP, DNS, and HTTP turned
+     * into browser fetch() calls (CORS rules apply). ?relay=wss://… for a
+     * real network relay, ?net=0 for no card. */
+    ...(params.get("net") === "0"
+      ? {}
+      : { net_device: { type: "ne2k", relay_url: params.get("relay") || "fetch" } }),
   });
   window.genesis = emu;
 

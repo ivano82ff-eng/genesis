@@ -101,6 +101,10 @@ static unsigned short gl_sum(const unsigned char *header, const unsigned char *p
 
 static void cache_flush(void);
 
+static int nic_kind; /* 1 = RTL8139, 2 = NE2000 (PCI) */
+static int ne_send(const unsigned char *frame, unsigned int length);
+void net_input(const unsigned char *frame, unsigned int length);
+
 static int rtl_send(const unsigned char *frame, unsigned int length) {
     if (length < 60) {
         length = 60;
@@ -131,6 +135,14 @@ static int rtl_send(const unsigned char *frame, unsigned int length) {
     return 0;
 }
 
+/* Send one Ethernet frame on whichever card was found. */
+int nic_send(const unsigned char *frame, unsigned int length) {
+    if (!link_ready) {
+        return 0;
+    }
+    return nic_kind == 2 ? ne_send(frame, length) : rtl_send(frame, length);
+}
+
 static int link_send(unsigned char type, const unsigned char *payload, unsigned int length) {
     unsigned char frame[1600];
     if (!link_ready || length > GL_MAX) {
@@ -158,7 +170,7 @@ static int link_send(unsigned char type, const unsigned char *payload, unsigned 
     while (total < 60) {
         frame[total++] = 0;
     }
-    return rtl_send(frame, total);
+    return nic_send(frame, total);
 }
 
 static int same_mac(const unsigned char *addr) {
@@ -171,7 +183,11 @@ static int same_mac(const unsigned char *addr) {
 }
 
 static void link_take(const unsigned char *frame, unsigned int length) {
-    if (length < 22 || frame[12] != ETH_TYPE_HI || frame[13] != ETH_TYPE_LO) {
+    if (length >= 14 && (frame[12] != ETH_TYPE_HI || frame[13] != ETH_TYPE_LO)) {
+        net_input(frame, length); /* ARP, IPv4: kernel/net.c */
+        return;
+    }
+    if (length < 22) {
         return;
     }
     if (same_mac(frame + 6)) {
@@ -307,11 +323,17 @@ static void rtl_receive(void) {
     }
 }
 
-void link_poll(void) {
+static void ne_receive(void);
+
+static void link_poll_locked(void) {
     if (!link_ready) {
         return;
     }
-    rtl_receive();
+    if (nic_kind == 2) {
+        ne_receive();
+    } else {
+        rtl_receive();
+    }
     if (reply_pong) {
         reply_pong = 0;
         link_send(GL_PONG, 0, 0);
@@ -321,6 +343,32 @@ void link_poll(void) {
         ack_pending = 0;
         put32(p, ack_offset);
         link_send(GL_ACK, p, 4);
+    }
+}
+
+/* The card is polled from the shell loop, guest_yield() and network waits in
+ * any task. One poll at a time, with interrupts off so a timer switch cannot
+ * start a second one half-way through a frame. */
+static volatile int link_busy;
+
+int link_polling(void) {
+    return link_busy;
+}
+
+void link_poll(void) {
+    unsigned long flags;
+#ifdef __x86_64__
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+#else
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) :: "memory");
+#endif
+    if (!link_busy) {
+        link_busy = 1;
+        link_poll_locked();
+        link_busy = 0;
+    }
+    if (flags & 0x200ul) {
+        __asm__ volatile("sti" ::: "memory");
     }
 }
 
@@ -354,27 +402,13 @@ int link_ping(void) {
     return 0;
 }
 
-void link_init(void) {
-    int slot = -1;
-    for (unsigned index = 0; index < 32; index++) {
-        unsigned int id = pci_read(index, 0);
-        if (id == 0xffffffffu || id == 0) {
-            continue;
-        }
-        if ((id & 0xffffu) == 0x10ecu && (id >> 16) == 0x8139u) {
-            slot = (int)index;
-            break;
-        }
-    }
-    if (slot < 0) {
-        return;
-    }
-    unsigned int bar = pci_read((unsigned)slot, 0x10);
+static int rtl_init(unsigned slot) {
+    unsigned int bar = pci_read(slot, 0x10);
     if ((bar & 1u) == 0) {
-        return;
+        return 0;
     }
-    unsigned int command = pci_read((unsigned)slot, 0x04);
-    pci_write((unsigned)slot, 0x04, command | 0x05u);
+    unsigned int command = pci_read(slot, 0x04);
+    pci_write(slot, 0x04, command | 0x05u);
     io_base = (unsigned short)(bar & ~3u);
     outb(io_base + 0x52, 0x00);
     outb(io_base + 0x37, 0x10);
@@ -386,7 +420,7 @@ void link_init(void) {
         }
     }
     if (!reset) {
-        return;
+        return 0;
     }
     for (int i = 0; i < 6; i++) {
         mac[i] = inb(io_base + (unsigned short)i);
@@ -396,8 +430,188 @@ void link_init(void) {
     outw(io_base + 0x3c, 0x0005);
     outl(io_base + 0x44, 0x8fu);
     outb(io_base + 0x37, 0x0c);
+    return 1;
+}
+
+/* ---- NE2000 (PCI 10ec:8029): QEMU ne2k_pci and the v86 browser card ---- */
+enum { NE_CR = 0x00, NE_PSTART = 0x01, NE_PSTOP = 0x02, NE_BNRY = 0x03, NE_TPSR = 0x04, NE_TBCR0 = 0x05,
+       NE_TBCR1 = 0x06, NE_ISR = 0x07, NE_RSAR0 = 0x08, NE_RSAR1 = 0x09, NE_RBCR0 = 0x0a, NE_RBCR1 = 0x0b,
+       NE_RCR = 0x0c, NE_TCR = 0x0d, NE_DCR = 0x0e, NE_IMR = 0x0f, NE_DATA = 0x10, NE_RESET = 0x1f,
+       NE_TX_PAGE = 0x40, NE_RX_START = 0x46, NE_RX_STOP = 0x80 };
+
+static inline unsigned short inw_(unsigned short port) {
+    unsigned short value;
+    __asm__ volatile("inw %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static void ne_dma_setup(unsigned int addr, unsigned int count, unsigned char cmd) {
+    outb(io_base + NE_RBCR0, (unsigned char)count);
+    outb(io_base + NE_RBCR1, (unsigned char)(count >> 8));
+    outb(io_base + NE_RSAR0, (unsigned char)addr);
+    outb(io_base + NE_RSAR1, (unsigned char)(addr >> 8));
+    outb(io_base + NE_CR, cmd);
+}
+
+/* Read COUNT bytes of card memory at ADDR (16-bit transfers). */
+static void ne_read(unsigned int addr, unsigned char *out, unsigned int count) {
+    unsigned int even = (count + 1u) & ~1u;
+    ne_dma_setup(addr, even, 0x0a);
+    for (unsigned int i = 0; i < even; i += 2) {
+        unsigned short w = inw_(io_base + NE_DATA);
+        out[i] = (unsigned char)w;
+        if (i + 1 < count) {
+            out[i + 1] = (unsigned char)(w >> 8);
+        }
+    }
+    for (int i = 0; i < 100000 && (inb(io_base + NE_ISR) & 0x40) == 0; i++) {
+    }
+    outb(io_base + NE_ISR, 0x40);
+}
+
+static int ne_send(const unsigned char *frame, unsigned int length) {
+    if (length < 60) {
+        length = 60;
+    }
+    if (length > 1514) {
+        return 0;
+    }
+    for (int i = 0; i < 1000000 && (inb(io_base + NE_CR) & 0x04) != 0; i++) {
+    }
+    unsigned int even = (length + 1u) & ~1u;
+    outb(io_base + NE_ISR, 0x40);
+    ne_dma_setup((unsigned int)NE_TX_PAGE << 8, even, 0x12);
+    for (unsigned int i = 0; i < even; i += 2) {
+        unsigned char lo = frame[i];
+        unsigned char hi = i + 1 < length ? frame[i + 1] : 0;
+        outw(io_base + NE_DATA, (unsigned short)(lo | (hi << 8)));
+    }
+    for (int i = 0; i < 100000 && (inb(io_base + NE_ISR) & 0x40) == 0; i++) {
+    }
+    outb(io_base + NE_ISR, 0x40);
+    outb(io_base + NE_TPSR, NE_TX_PAGE);
+    outb(io_base + NE_TBCR0, (unsigned char)length);
+    outb(io_base + NE_TBCR1, (unsigned char)(length >> 8));
+    outb(io_base + NE_CR, 0x26);
+    for (int i = 0; i < 1000000; i++) {
+        if ((inb(io_base + NE_CR) & 0x04) == 0) {
+            outb(io_base + NE_ISR, 0x0a);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void ne_receive(void) {
+    static unsigned char frame[1600];
+    for (int n = 0; n < 16; n++) {
+        outb(io_base + NE_CR, 0x62);
+        unsigned char curr = inb(io_base + 0x07);
+        outb(io_base + NE_CR, 0x22);
+        unsigned char bnry = inb(io_base + NE_BNRY);
+        unsigned char page = (unsigned char)(bnry + 1);
+        if (page >= NE_RX_STOP) {
+            page = NE_RX_START;
+        }
+        if (page == curr) {
+            outb(io_base + NE_ISR, 0x15); /* RX, RX error, overwrite */
+            return;
+        }
+        unsigned char hdr[4];
+        ne_read((unsigned int)page << 8, hdr, 4);
+        unsigned char next = hdr[1];
+        unsigned int len = (unsigned int)hdr[2] | ((unsigned int)hdr[3] << 8);
+        if (next < NE_RX_START || next >= NE_RX_STOP || len < 4 + 14 || len > 1600 + 4) {
+            /* lost sync: drop everything that is queued */
+            outb(io_base + NE_BNRY, curr == NE_RX_START ? NE_RX_STOP - 1 : (unsigned char)(curr - 1));
+            return;
+        }
+        unsigned int body = len - 4;
+        unsigned int start = ((unsigned int)page << 8) + 4;
+        unsigned int ring_end = (unsigned int)NE_RX_STOP << 8;
+        if (start + body > ring_end) {
+            unsigned int first = ring_end - start;
+            ne_read(start, frame, first);
+            ne_read((unsigned int)NE_RX_START << 8, frame + first, body - first);
+        } else {
+            ne_read(start, frame, body);
+        }
+        outb(io_base + NE_BNRY, next == NE_RX_START ? NE_RX_STOP - 1 : (unsigned char)(next - 1));
+        if ((hdr[0] & 0x01) != 0) {
+            link_take(frame, body);
+        }
+    }
+}
+
+static int ne_init(unsigned slot) {
+    unsigned int bar = pci_read(slot, 0x10);
+    if ((bar & 1u) == 0) {
+        return 0;
+    }
+    unsigned int command = pci_read(slot, 0x04);
+    pci_write(slot, 0x04, command | 0x05u);
+    io_base = (unsigned short)(bar & ~3u);
+    outb(io_base + NE_RESET, inb(io_base + NE_RESET));
+    for (int i = 0; i < 100000 && (inb(io_base + NE_ISR) & 0x80) == 0; i++) {
+    }
+    outb(io_base + NE_ISR, 0xff);
+    outb(io_base + NE_CR, 0x21);
+    outb(io_base + NE_DCR, 0x49);
+    outb(io_base + NE_RBCR0, 0);
+    outb(io_base + NE_RBCR1, 0);
+    outb(io_base + NE_IMR, 0);
+    outb(io_base + NE_ISR, 0xff);
+    outb(io_base + NE_RCR, 0x20);
+    outb(io_base + NE_TCR, 0x02);
+    unsigned char prom[32];
+    ne_read(0, prom, 32);
+    for (int i = 0; i < 6; i++) {
+        mac[i] = prom[i * 2];
+    }
+    outb(io_base + NE_PSTART, NE_RX_START);
+    outb(io_base + NE_PSTOP, NE_RX_STOP);
+    outb(io_base + NE_BNRY, NE_RX_START);
+    outb(io_base + NE_TPSR, NE_TX_PAGE);
+    outb(io_base + NE_CR, 0x61);
+    for (int i = 0; i < 6; i++) {
+        outb(io_base + 0x01 + i, mac[i]);
+    }
+    for (int i = 0; i < 8; i++) {
+        outb(io_base + 0x08 + i, 0xff);
+    }
+    outb(io_base + 0x07, NE_RX_START + 1);
+    outb(io_base + NE_CR, 0x22);
+    outb(io_base + NE_ISR, 0xff);
+    outb(io_base + NE_TCR, 0x00);
+    outb(io_base + NE_RCR, 0x04); /* our MAC and broadcast */
+    return 1;
+}
+
+void link_init(void) {
+    for (unsigned index = 0; index < 32 && nic_kind == 0; index++) {
+        unsigned int id = pci_read(index, 0);
+        if (id == 0xffffffffu || id == 0 || (id & 0xffffu) != 0x10ecu) {
+            continue;
+        }
+        if ((id >> 16) == 0x8139u && rtl_init(index)) {
+            nic_kind = 1;
+        } else if ((id >> 16) == 0x8029u && ne_init(index)) {
+            nic_kind = 2;
+        }
+    }
+    if (nic_kind == 0) {
+        return;
+    }
     link_ready = 1;
     console_puts("link: up\n");
+}
+
+/* The card's name and MAC for `net`. */
+const char *nic_info(unsigned char *out_mac) {
+    for (int i = 0; i < 6; i++) {
+        out_mac[i] = mac[i];
+    }
+    return nic_kind == 1 ? "rtl8139" : nic_kind == 2 ? "ne2k" : 0;
 }
 
 /* Send one frame and wait for its acknowledgement (offset `want`). */

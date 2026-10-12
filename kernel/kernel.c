@@ -32,6 +32,7 @@ void machine_poweroff(void);
 void machine_reboot(void);
 void link_init(void);
 void link_poll(void);
+int net_command(const char *line);
 void clock_service(void);
 void clock_tz(const char *arg, char *out, unsigned int size);
 int link_up(void);
@@ -2406,7 +2407,7 @@ void kbd_toggle_layout(void) {
 static const char *const sh_words[] = {
     "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
     "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
-    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc",
+    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc", "net", "ifconfig", "dhcp", "dns", "http", "nc", "udp",
 };
 
 static unsigned int cand_used;
@@ -2557,6 +2558,7 @@ static void execute(char *input) {
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
+        console_puts("net: net, dhcp, ping HOST, dns NAME, http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
         console_puts("C: cc FILE.c or run FILE.c  (cc /docs/hello.c, cc /docs/fib.c)\n");
         return;
     }
@@ -2700,6 +2702,9 @@ static void execute(char *input) {
     }
     if (str_eq(input, "reboot")) {
         machine_reboot();
+        return;
+    }
+    if (net_command(input)) {
         return;
     }
     if (str_eq(input, "ping")) {
