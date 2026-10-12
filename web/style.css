@@ -13,6 +13,7 @@ html, body { margin: 0; height: 100%; background: #0b0f1a; color: #e8ecff; overf
 #loading_text { font-size: 22px; }
 #loading_bar { width: min(320px, 80vw); height: 6px; background: #ffffff22; border-radius: 3px; overflow: hidden; }
 #loading_bar div { height: 100%; width: 0; background: #6ad7ff; transition: width 0.2s; }
+#loading_build { font-size: 12px; opacity: 0.5; }
 #loading_hint { font-size: 14px; opacity: 0.7; max-width: 420px; }
 #toolbar { position: fixed; top: max(8px, env(safe-area-inset-top)); right: 8px; display: flex; gap: 6px; z-index: 10; }
 button { font: inherit; color: #e8ecff; background: #1c244099; border: 1px solid #6ad7ff55; border-radius: 12px;

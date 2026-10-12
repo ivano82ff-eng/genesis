@@ -72,10 +72,10 @@ async function main() {
   const { db, buffer } = await loadDisk();
 
   const emu = new V86({
-    wasm_path: "v86/v86.wasm",
+    wasm_path: "v86/v86.wasm?v=__BUILD__",
     bios: { url: "v86/seabios.bin" },
     vga_bios: { url: "v86/vgabios.bin" },
-    cdrom: { url: "genesis.iso" },
+    cdrom: { url: "genesis.iso?v=__BUILD__" }, /* stamped per deploy: a new build is never served from cache */
     hda: { buffer },
     boot_order: 0x123,
     memory_size: 128 * 1024 * 1024,
