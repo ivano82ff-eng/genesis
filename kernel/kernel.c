@@ -1404,6 +1404,12 @@ extern const unsigned char sample_note_pdf_end[];
 extern const unsigned char sample_clip_mp4[];
 extern const unsigned char sample_clip_mp4_end[];
 
+extern const char cc_sample_hello[];
+extern const char cc_sample_fib[];
+extern const unsigned int cc_sample_hello_len;
+extern const unsigned int cc_sample_fib_len;
+int cc_run(const char *source, const char *name);
+
 /* Set while refreshing an existing disk: add built-in files only where missing. */
 static int seed_only_missing;
 
@@ -1439,6 +1445,10 @@ static void fs_seed(void) {
     fs_seed_blob("/docs/pic.jpg", sample_pic_jpg, sample_pic_jpg_end);
     fs_seed_blob("/docs/note.pdf", sample_note_pdf, sample_note_pdf_end);
     fs_seed_blob("/docs/clip.mp4", sample_clip_mp4, sample_clip_mp4_end);
+    fs_seed_blob("/docs/hello.c", (const unsigned char *)cc_sample_hello,
+                 (const unsigned char *)cc_sample_hello + cc_sample_hello_len);
+    fs_seed_blob("/docs/fib.c", (const unsigned char *)cc_sample_fib,
+                 (const unsigned char *)cc_sample_fib + cc_sample_fib_len);
 }
 
 /* Built-in names an old flat (GBF1) disk may hold; they are re-seeded. */
@@ -1534,6 +1544,57 @@ static void cmd_ls(const char *arg) {
         }
     }
     console_putc('\n');
+}
+
+/* cc FILE.c: compile with the built-in C compiler (kernel/cc.c) and run. */
+static char cc_source[64 * 1024];
+
+static int ends_with_c(const char *line) {
+    unsigned int n = 0;
+    while (line[n] != 0) {
+        n++;
+    }
+    while (n > 0 && line[n - 1] == ' ') {
+        n--;
+    }
+    return n > 2 && line[n - 2] == '.' && line[n - 1] == 'c';
+}
+
+static void cmd_cc(const char *name) {
+    while (*name == ' ') {
+        name++;
+    }
+    if (*name == 0) {
+        console_puts("cc: usage: cc FILE.c   (try cc /docs/hello.c)\n");
+        return;
+    }
+    struct ram_file *file = fs_find(name);
+    if (file == 0) {
+        console_puts("cc: no such file\n");
+        return;
+    }
+    if (file->length >= sizeof cc_source) {
+        console_puts("cc: file too big (64 KiB max)\n");
+        return;
+    }
+    for (unsigned int i = 0; i < file->length; i++) {
+        cc_source[i] = file->data[i];
+    }
+    cc_source[file->length] = 0;
+    int rc = cc_run(cc_source, name);
+    if (rc > 0) { /* -1: the error is already printed */
+        console_puts("cc: exit ");
+        char digits[12];
+        int n = 0;
+        do {
+            digits[n++] = (char)('0' + rc % 10);
+            rc /= 10;
+        } while (rc != 0);
+        while (n > 0) {
+            console_putc(digits[--n]);
+        }
+        console_putc('\n');
+    }
 }
 
 static void cmd_cat(const char *name) {
@@ -2328,7 +2389,7 @@ void kbd_toggle_layout(void) {
 static const char *const sh_words[] = {
     "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
     "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
-    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz",
+    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc",
 };
 
 static unsigned int cand_used;
@@ -2479,6 +2540,7 @@ static void execute(char *input) {
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
+        console_puts("C: cc FILE.c or run FILE.c  (cc /docs/hello.c, cc /docs/fib.c)\n");
         return;
     }
     if (str_eq(input, "clear")) {
@@ -2547,6 +2609,14 @@ static void execute(char *input) {
     }
     if (str_eq(input, "edit") || starts_with(input, "edit ")) {
         cmd_edit(input[4] == ' ' ? input + 5 : "");
+        return;
+    }
+    if (str_eq(input, "cc") || starts_with(input, "cc ")) {
+        cmd_cc(input[2] == ' ' ? input + 3 : "");
+        return;
+    }
+    if (starts_with(input, "run ") && ends_with_c(input)) {
+        cmd_cc(input + 4);
         return;
     }
     if (str_eq(input, "run") || starts_with(input, "run ")) {
