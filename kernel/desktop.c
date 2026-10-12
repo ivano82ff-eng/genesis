@@ -3223,7 +3223,14 @@ static void publish_clock(void) {
     console_puts(up);
 }
 
+static volatile unsigned int ticks_total;
+
+unsigned int clock_ticks_total(void) {
+    return ticks_total;
+}
+
 void timer_tick(void) {
+    ticks_total++;
     ps2_drain();
     outb(0x20, 0x20);
     if (!desktop_on) {

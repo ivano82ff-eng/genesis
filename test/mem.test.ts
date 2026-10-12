@@ -31,7 +31,7 @@ test(
       assert.match(guest.serial, /map 0x[0-9a-f]+ 0x[0-9a-f]+ type 1/);
 
       await typeLine(guest, "alloc 16");
-      await guest.waitForSerial("alloc: 0x0000000000200000", DEFAULT_TIMEOUT_MS);
+      await guest.waitForSerial("alloc: 0x0000000000e00000", DEFAULT_TIMEOUT_MS);
 
       await typeLine(guest, "heap");
       await guest.waitForSerial("heap: used 16 left 1048560", DEFAULT_TIMEOUT_MS);

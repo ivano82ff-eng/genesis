@@ -32,6 +32,7 @@ void machine_poweroff(void);
 void machine_reboot(void);
 void link_init(void);
 void link_poll(void);
+int net_command(const char *line);
 void clock_service(void);
 void clock_tz(const char *arg, char *out, unsigned int size);
 int link_up(void);
@@ -48,6 +49,7 @@ void cmd_ps(void);
 #else
 #define PUSHF_POP "pushfl; popl"
 #endif
+#include "fs_limits.h"
 #include "editor.h"
 #include "utf8.h"
 
@@ -874,7 +876,8 @@ struct mem_region {
 static struct mem_region mem_map[MAP_MAX];
 static int mem_map_count = 0;
 static unsigned long usable_bytes = 0;
-static unsigned char *const HEAP = (unsigned char *)0x200000;
+/* Was 0x200000, inside the kernel's own BSS once it grew past 1 MiB. */
+static unsigned char *const HEAP = (unsigned char *)KERNEL_HEAP_ADDR;
 static unsigned int heap_used = 0;
 
 static void memory_init(unsigned int info_addr) {
@@ -2406,7 +2409,7 @@ void kbd_toggle_layout(void) {
 static const char *const sh_words[] = {
     "help", "echo", "clear", "mem", "alloc", "heap", "ls", "cat", "write", "rm", "run", "spawn",
     "ps", "kill", "desktop", "pwd", "cd", "mkdir", "rmdir", "mv", "cp", "edit", "pkg", "pin",
-    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc",
+    "unpin", "poweroff", "reboot", "ping", "say", "send", "sh", "set", "grep", "wc", "head", "tz", "cc", "net", "ifconfig", "dhcp", "dns", "http", "nc", "udp",
 };
 
 static unsigned int cand_used;
@@ -2557,6 +2560,7 @@ static void execute(char *input) {
         console_puts("shell: sh set grep wc head  NAME=v $NAME \"..\" '..' | > >> ; & #\n");
         console_puts("packages: pkg list | installed | install NAME | remove NAME\n");
         console_puts("tasks: spawn NAME, ps, kill N  desktop: pin DIR, unpin DIR  Tab completes\n");
+        console_puts("net: net, dhcp, ping HOST, dns NAME, http URL, nc HOST PORT [TEXT], udp HOST PORT TEXT\n");
         console_puts("C: cc FILE.c or run FILE.c  (cc /docs/hello.c, cc /docs/fib.c)\n");
         return;
     }
@@ -2700,6 +2704,9 @@ static void execute(char *input) {
     }
     if (str_eq(input, "reboot")) {
         machine_reboot();
+        return;
+    }
+    if (net_command(input)) {
         return;
     }
     if (str_eq(input, "ping")) {
