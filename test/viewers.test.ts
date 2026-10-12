@@ -63,6 +63,17 @@ test(
       await typeLine(img, "desktop");
       await img.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
       await openRow(img, 3, "image: ok");
+      // JPEG too (row 4): its SIMD path used to fault the machine.
+      await img.sendKey("esc");
+      await img.waitForSerial("home: ready", DEFAULT_TIMEOUT_MS);
+      const before = img.serial.split("image: ok").length;
+      await openRow(img, 4, "home: ready");
+      const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
+      while (img.serial.split("image: ok").length <= before) {
+        if (Date.now() > deadline) throw new Error(img.serial.slice(-800));
+        await delay(100);
+      }
+      assert.equal(img.serial.split("kernel booted").length, 2, "JPEG перезагрузил машину");
     } finally {
       await img.stop();
     }

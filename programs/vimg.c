@@ -1,6 +1,7 @@
 #include "api.h"
 
 #define STBI_NO_STDIO
+#define STBI_NO_SIMD /* no SSE state is set up for programs: the SIMD JPEG path faulted */
 #define STBI_NO_THREAD_LOCALS
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
@@ -11,7 +12,7 @@
 #include "../third_party/stb_image.h"
 
 void viewer_main(struct genesis_api *api) {
-    api->fill(40, 90, GENESIS_FB_W - 80, GENESIS_FB_H - 120, 0x00243044u);
+    api->fill(40, 90, api->width - 80, api->height - 120, 0x00243044u);
     api->text(48, 100, "Рисунок", 0x00f0c14au, 2);
     int w = 0;
     int h = 0;
@@ -23,11 +24,15 @@ void viewer_main(struct genesis_api *api) {
     } else {
         int x0 = 48;
         int y0 = 140;
-        int max_w = GENESIS_FB_W - 96;
-        int max_h = GENESIS_FB_H - 180;
+        int max_w = api->width - 96;
+        int max_h = api->height - 180;
         int step = 1;
         while ((w / step) > max_w || (h / step) > max_h) {
             step++;
+        }
+        x0 = (api->width - w / step) / 2; /* centred on any screen */
+        if (x0 < 48) {
+            x0 = 48;
         }
         for (int y = 0; y < h; y += step) {
             for (int x = 0; x < w; x += step) {

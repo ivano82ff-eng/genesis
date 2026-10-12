@@ -33,7 +33,7 @@ static void show_page_text(struct genesis_api *api) {
 }
 
 void viewer_main(struct genesis_api *api) {
-    api->fill(40, 90, GENESIS_FB_W - 80, GENESIS_FB_H - 120, 0x00243044u);
+    api->fill(40, 90, api->width - 80, api->height - 120, 0x00243044u);
     api->text(48, 100, "PDF", 0x00f0c14au, 2);
     show_page_text(api);
     while (!api->poll_back()) {

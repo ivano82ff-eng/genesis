@@ -46,7 +46,7 @@ static void blit_jpeg(struct genesis_api *api, const unsigned char *jpg, unsigne
 
 /* Real MP4 (isom) with MJPEG frames in mdat. */
 void viewer_main(struct genesis_api *api) {
-    api->fill(40, 90, GENESIS_FB_W - 80, GENESIS_FB_H - 120, 0x00243044u);
+    api->fill(40, 90, api->width - 80, api->height - 120, 0x00243044u);
     api->text(48, 100, "Видео", 0x00f0c14au, 2);
     const unsigned char *mdat = 0;
     unsigned int mdat_len = 0;
