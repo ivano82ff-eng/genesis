@@ -11,7 +11,7 @@ import { click, countOf, delay, typeLine } from "./helpers.js";
 import { CELL, fileRow } from "./ui.js";
 
 test(
-  "a file name opens its text and Назад returns home",
+  "a file name opens its text, Назад goes back one step, Esc returns home",
   { timeout: 90_000 },
   async () => {
     const missing = missingTools(["qemu-system-x86_64"]);
@@ -30,12 +30,18 @@ test(
       // /home: row 0 is "..", row 1 is readme.
       await click(guest, fileRow(1).x, fileRow(1).y);
       await guest.waitForSerial("txt: welcome to genesis", DEFAULT_TIMEOUT_MS);
-      const homes = countOf(guest.serial, "home: ready");
+      // «Назад» = one step: back to the folder the file was opened from.
+      const mark = guest.serial.length;
       await click(guest, 80, 40);
+      await guest.waitForSerial("back: /home", DEFAULT_TIMEOUT_MS);
+      assert.ok(guest.serial.indexOf("back: /home", mark) > 0);
+      // Esc closes the window.
+      const homes = countOf(guest.serial, "home: ready");
+      await guest.sendKey("esc");
       const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
       while (countOf(guest.serial, "home: ready") <= homes) {
         if (Date.now() > deadline) {
-          throw new Error(`«Назад» не вернул домой\n${guest.serial}`);
+          throw new Error(`Esc не вернул домой\n${guest.serial}`);
         }
         await delay(50);
       }
