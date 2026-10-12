@@ -9,7 +9,7 @@ import {
   hostToolError,
   missingTools,
 } from "../src/pipeline.js";
-import { delay, pixel, typeLine } from "./helpers.js";
+import { click, delay, pixel, typeLine } from "./helpers.js";
 import { CELL } from "./ui.js";
 
 function isYellow([r, g, b]: [number, number, number]): boolean {
@@ -46,23 +46,11 @@ test(
       }
       assert.equal(prompt, true, "нет жёлтого приглашения в строке команд");
 
-      let left = CELL.memory.x;
-      let top = CELL.memory.y;
-      while (left > 0 || top > 0) {
-        const stepX = Math.min(40, left);
-        const stepY = Math.min(40, top);
-        await guest.monitor(`mouse_move ${stepX} ${stepY}`);
-        left -= stepX;
-        top -= stepY;
-        await delay(200);
-      }
-      await guest.monitor("mouse_button 1");
-      await delay(80);
-      await guest.monitor("mouse_button 0");
+      await click(guest, CELL.memory.x, CELL.memory.y);
       await guest.waitForSerial("usable ", DEFAULT_TIMEOUT_MS);
       assert.match(guest.serial, /Назад/);
 
-      /* show_memory arms the pointer at 0,0 so the next click can hit «Назад». */
+      /* Regression: opening a section must not throw the pointer back to 0,0. */
       /* The guest idles with hlt between ticks, so the redraw can land just after the serial line. */
       let cursor = false;
       for (let attempt = 0; attempt < 20 && !cursor; attempt++) {
@@ -70,8 +58,15 @@ test(
           await delay(250);
         }
         const after = parsePpm(await guest.screendump());
-        for (let y = 0; y < 40 && !cursor; y++) {
-          for (let x = 0; x < 40; x++) {
+        let corner = false;
+        for (let y = 0; y < 12; y++) {
+          for (let x = 0; x < 12; x++) {
+            corner ||= isCursor(pixel(after, x, y));
+          }
+        }
+        assert.equal(corner, false, "указатель прыгнул в левый верхний угол");
+        for (let y = CELL.memory.y - 4; y < CELL.memory.y + 24 && !cursor; y++) {
+          for (let x = CELL.memory.x - 4; x < CELL.memory.x + 24; x++) {
             if (isCursor(pixel(after, x, y))) {
               cursor = true;
               break;
