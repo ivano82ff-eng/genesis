@@ -1,0 +1,31 @@
+html, body { margin: 0; height: 100%; background: #0b0f1a; color: #e8ecff; overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; touch-action: none; }
+#screen_container { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+#screen_container canvas { image-rendering: pixelated; max-width: 100vw; max-height: 100vh; }
+#text_screen { white-space: pre; font: 14px/1 monospace; color: #ccc; }
+#text_screen:empty { display: none; }
+#loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px; background: radial-gradient(circle at 50% 40%, #1b2550, #0b0f1a 70%); text-align: center; padding: 24px; z-index: 5; }
+#loading.done { display: none; }
+#loading .core { width: 72px; height: 72px; clip-path: polygon(25% 5%, 75% 5%, 100% 50%, 75% 95%, 25% 95%, 0 50%);
+  background: linear-gradient(135deg, #6ad7ff, #7b5cff); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { transform: scale(0.85); opacity: 0.6; } }
+#loading_text { font-size: 22px; }
+#loading_bar { width: min(320px, 80vw); height: 6px; background: #ffffff22; border-radius: 3px; overflow: hidden; }
+#loading_bar div { height: 100%; width: 0; background: #6ad7ff; transition: width 0.2s; }
+#loading_hint { font-size: 14px; opacity: 0.7; max-width: 420px; }
+#toolbar { position: fixed; top: max(8px, env(safe-area-inset-top)); right: 8px; display: flex; gap: 6px; z-index: 10; }
+button { font: inherit; color: #e8ecff; background: #1c244099; border: 1px solid #6ad7ff55; border-radius: 12px;
+  min-width: 48px; min-height: 48px; font-size: 20px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+button:active, button.on { background: #6ad7ff; color: #0b0f1a; }
+button:focus-visible { outline: 3px solid #ffd76a; }
+#pad { position: fixed; left: 0; right: 0; bottom: max(8px, env(safe-area-inset-bottom)); display: flex;
+  justify-content: space-between; align-items: flex-end; padding: 0 12px; z-index: 10; pointer-events: none; }
+#pad[hidden] { display: none; }
+#pad > * { pointer-events: auto; }
+.dpad { display: grid; grid-template: repeat(3, 58px) / repeat(3, 58px); gap: 4px; }
+.dpad .up { grid-area: 1 / 2; } .dpad .left { grid-area: 2 / 1; } .dpad .ok { grid-area: 2 / 2; font-size: 16px; }
+.dpad .right { grid-area: 2 / 3; } .dpad .down { grid-area: 3 / 2; }
+.keys { display: grid; grid-template-columns: repeat(2, 72px); gap: 6px; }
+.keys button { font-size: 16px; }
+#typer { position: fixed; left: -1000px; top: 0; width: 10px; height: 10px; opacity: 0; }

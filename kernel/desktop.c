@@ -1876,6 +1876,7 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
     viewer_entry entry = (viewer_entry)(void *)PROG_LOAD_ADDR;
     {
         unsigned long stack_top = 0x900000ul + 512ul * 1024ul;
+#ifdef __x86_64__
         __asm__ volatile(
             "mov %%rsp, %%r12\n\t"
             "mov %[sp], %%rsp\n\t"
@@ -1886,6 +1887,19 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
             : [sp] "r"(stack_top), [api] "r"(&api), [fn] "r"(entry)
             : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
               "memory");
+#else
+        /* cdecl: the api pointer goes on the viewer's own stack; esi survives the call. */
+        __asm__ volatile(
+            "mov %%esp, %%esi\n\t"
+            "mov %[sp], %%esp\n\t"
+            "sub $12, %%esp\n\t"
+            "push %[api]\n\t"
+            "call *%[fn]\n\t"
+            "mov %%esi, %%esp\n\t"
+            :
+            : [sp] "a"(stack_top), [api] "c"(&api), [fn] "d"(entry)
+            : "esi", "memory");
+#endif
     }
     show_home();
 }
@@ -2912,9 +2926,17 @@ struct idt_entry {
     unsigned char ist;
     unsigned char type_attr;
     unsigned short offset_mid;
+#ifdef __x86_64__
     unsigned int offset_high;
     unsigned int zero;
+#endif
 } __attribute__((packed));
+
+#ifdef __x86_64__
+#define IDT_HIGH(e, addr) ((e).offset_high = (unsigned int)((addr) >> 32), (e).zero = 0)
+#else
+#define IDT_HIGH(e, addr) ((void)(addr)) /* i686: 8-byte gates, no IST */
+#endif
 
 struct idt_ptr {
     unsigned short limit;
@@ -2932,11 +2954,15 @@ void idt_gate(int number, void *handler, unsigned char attr, unsigned char ist) 
     unsigned long addr = (unsigned long)handler;
     idt[number].offset_low = (unsigned short)addr;
     idt[number].selector = 0x08;
+#ifdef __x86_64__
     idt[number].ist = ist;
+#else
+    (void)ist;
+    idt[number].ist = 0;
+#endif
     idt[number].type_attr = attr;
     idt[number].offset_mid = (unsigned short)(addr >> 16);
-    idt[number].offset_high = (unsigned int)(addr >> 32);
-    idt[number].zero = 0;
+    IDT_HIGH(idt[number], addr);
 }
 
 void user_init(void);
@@ -2948,8 +2974,7 @@ static void set_gate(int number, void *handler) {
     idt[number].ist = 0;
     idt[number].type_attr = 0x8e;
     idt[number].offset_mid = (unsigned short)(addr >> 16);
-    idt[number].offset_high = (unsigned int)(addr >> 32);
-    idt[number].zero = 0;
+    IDT_HIGH(idt[number], addr);
 }
 
 static void print_u2(unsigned int value, char *dest) {
@@ -3173,6 +3198,15 @@ void timer_start(void) {
     outb(0x40, (unsigned char)divisor);
     outb(0x40, (unsigned char)(divisor >> 8));
     __asm__ volatile("sti");
+}
+
+/* Framebuffer size for the mouse clamp in kernel.c. */
+int desktop_width(void) {
+    return FB_W;
+}
+
+int desktop_height(void) {
+    return FB_H;
 }
 
 /* `desktop WxH`: pick the framebuffer size (portrait phones, 1080p TVs). */

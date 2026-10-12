@@ -23,6 +23,8 @@ function usage(code: number): never {
 
 Команды:
   build                 собрать build/genesis.iso
+  --arch i686           (с любой командой) 32-битная сборка для браузера:
+                        build/i686/genesis.iso и qemu-system-i386
   run [--timeout СЕК]   запустить QEMU, снять COM1
   test [--timeout СЕК]  то же, что run: код 0 только если найден маркер
   log [--timeout СЕК]   дождаться приглашения и отдать журнал COM1
@@ -59,7 +61,7 @@ function readTimeout(args: string[]): number {
 }
 
 async function boot(timeoutMs: number): Promise<void> {
-  const missing = missingTools(["qemu-system-x86_64"]);
+  const missing = missingTools([pickQemu("none")]);
   if (missing.length > 0) {
     throw hostToolError(missing);
   }
@@ -164,7 +166,14 @@ async function log(timeoutMs: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [command, ...rest] = process.argv.slice(2);
+  // --arch i686 anywhere: the 32-bit build for the browser (build/i686/genesis.iso).
+  const argv = process.argv.slice(2);
+  const archAt = argv.indexOf("--arch");
+  if (archAt >= 0) {
+    process.env.GENESIS_ARCH = argv[archAt + 1] ?? "";
+    argv.splice(archAt, 2);
+  }
+  const [command, ...rest] = argv;
   if (
     command == null ||
     command === "-h" ||

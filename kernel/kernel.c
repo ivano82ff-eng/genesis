@@ -43,6 +43,11 @@ int task_current(void);
 void task_sleep(unsigned int ticks);
 void cmd_ps(void);
 
+#ifdef __x86_64__
+#define PUSHF_POP "pushfq; popq"
+#else
+#define PUSHF_POP "pushfl; popl"
+#endif
 #include "editor.h"
 #include "utf8.h"
 
@@ -325,6 +330,9 @@ static void mouse_init(void) {
     (void)inb(0x60);
 }
 
+int desktop_width(void);
+int desktop_height(void);
+
 static int mouse_cycle = 0;
 static unsigned char mouse_bytes[3];
 static int mouse_x = 0;
@@ -354,11 +362,12 @@ static void mouse_packet(unsigned char data) {
     if (mouse_y < 0) {
         mouse_y = 0;
     }
-    if (mouse_x > 1023) {
-        mouse_x = 1023;
+    /* the real screen size: 480x800 phones and 1920x1080 TVs too */
+    if (mouse_x > desktop_width() - 1) {
+        mouse_x = desktop_width() - 1;
     }
-    if (mouse_y > 767) {
-        mouse_y = 767;
+    if (mouse_y > desktop_height() - 1) {
+        mouse_y = desktop_height() - 1;
     }
     int was_left = mouse_left;
     mouse_left = (mouse_bytes[0] & 0x01) != 0;
@@ -403,7 +412,7 @@ static int kbd_alt;
 static int kbd_count;
 
 static void ps2_lock(unsigned long *flags) {
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(*flags)::"memory");
+    __asm__ volatile(PUSHF_POP " %0; cli" : "=r"(*flags)::"memory");
 }
 
 static void ps2_unlock(unsigned long flags) {
@@ -800,10 +809,10 @@ static int parse_u32(const char *text, unsigned int *out) {
     return 1;
 }
 
-static void print_hex64(unsigned long value) {
+static void print_hex64(unsigned long long value) {
     console_puts("0x");
     for (int shift = 60; shift >= 0; shift -= 4) {
-        unsigned int nibble = (unsigned int)((value >> shift) & 0xful);
+        unsigned int nibble = (unsigned int)((value >> shift) & 0xfull);
         console_putc((char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10)));
     }
 }
@@ -1856,7 +1865,7 @@ int task_crash_take(char *out, unsigned int cap) {
         return 0;
     }
     unsigned long flags;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags)::"memory");
+    __asm__ volatile(PUSHF_POP " %0; cli" : "=r"(flags)::"memory");
     unsigned int n = 0;
     while (crash_pending[n] != 0 && n + 1 < cap) {
         out[n] = crash_pending[n];
