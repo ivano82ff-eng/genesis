@@ -1124,10 +1124,19 @@ static int pkg_row_count;
 /* Everything in the panel that can be clicked, tapped or picked with the
  * arrows + Enter (TV remote) is an item; the same code runs either way. */
 enum { A_CLOSE = 0, A_ROW, A_UP, A_DOWN, A_PKG, A_LAYOUT, A_REBOOT, A_POWEROFF, A_KILL, A_CHIP, A_CARD, A_FEED_PREV,
-       A_FEED_NEXT, A_TO_FEED };
+       A_FEED_NEXT, A_TO_FEED, A_BACK };
 enum { ITEM_MAX = 32 };
 static int it_n;
 static int it_x[ITEM_MAX], it_y[ITEM_MAX], it_w[ITEM_MAX], it_h[ITEM_MAX], it_act[ITEM_MAX], it_arg[ITEM_MAX];
+/* Navigation history of the open window: every step inside it (a folder, a
+ * viewer, a Лента filter, «В ленту») pushes where we were. Back pops exactly
+ * one step; with nothing left it closes the window. Esc / X close it at once. */
+struct nav_step { int panel; char dir[FS_NAME]; int focus, top, filter; };
+enum { NAV_MAX = 24 };
+static struct nav_step nav_stack[NAV_MAX];
+static int nav_n;
+static void nav_push(void);
+static void nav_back(void);
 static int pfocus = -1; /* focused item, -1 = none (mouse use) */
 static int pfocus_pending; /* the panel is being opened with Enter */
 
@@ -1582,7 +1591,14 @@ static void draw_panel(void) {
         button(CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H, "< Назад", CYAN_MID, CELL);
         ui_text(CLOSE_X + CLOSE_W + P(14), title_y, panel_title(), CYAN, 2);
     } else {
-        ui_text(PANEL_X + P(16), title_y, panel_title(), CYAN, 2);
+        int tx = PANEL_X + P(16);
+        if (nav_n > 0) {
+            /* one step back inside this window */
+            button(PANEL_X + P(8), CLOSE_Y, CLOSE_W, CLOSE_H, "<", CYAN_MID, CELL);
+            item(PANEL_X + P(8), CLOSE_Y, CLOSE_W, CLOSE_H, A_BACK, 0);
+            tx = PANEL_X + P(16) + CLOSE_W;
+        }
+        ui_text(tx, title_y, panel_title(), CYAN, 2);
         frame_rect(CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H, RED_MID, RED_DIM);
         text_c(CLOSE_X + CLOSE_W / 2, CLOSE_Y + (CLOSE_H - 8 * ts(2)) / 2, "X", WHITE, 2);
     }
@@ -1751,12 +1767,15 @@ static int back_hit(int x, int y) {
 }
 
 static void show_home(void);
+static void open_panel(int which);
 
 static void say_back(void) {
     console_puts("Назад\n");
 }
 
-static int viewer_back;
+static int viewer_back; /* 1 = Back (one step), 2 = Esc (close the window) */
+
+
 static void api_puts(const char *message) { console_puts(message); }
 static void api_text(int x, int y, const char *message, unsigned int color, int scale) {
     text(x, y, message, color, scale);
@@ -1850,6 +1869,7 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
     for (unsigned int i = 0; i < GENESIS_PROG_HEAP; i++) {
         dest[prog_len + i] = 0;
     }
+    nav_push();
     view = VIEW_VIEWER;
     viewer_back = 0;
     viewer_arena_used = 0;
@@ -1901,7 +1921,11 @@ static void launch_viewer(const char *viewer, const unsigned char *file, unsigne
             : "esi", "memory");
 #endif
     }
-    show_home();
+    if (viewer_back == 2) {
+        show_home();
+        return;
+    }
+    nav_back();
 }
 
 
@@ -1918,6 +1942,7 @@ static void set_docked(int on) {
 }
 
 static void show_home(void) {
+    nav_n = 0;
     view = VIEW_HOME;
     panel = P_NONE;
     send_mode = 0;
@@ -2052,6 +2077,7 @@ static void bar_exec(const char *cmd, int show_term) {
 }
 
 static void open_cell(int i) {
+    nav_n = 0; /* another window: a fresh history */
     if (i == CELL_PEER) {
         /* «Отправить файл»: pick a file in /home, it goes to the peer. */
         send_mode = 1;
@@ -2122,7 +2148,9 @@ static void show_file(int row) {
     }
     if (row_dir[row]) {
         char line[512];
+        nav_push();
         s_copy(desk_dir, path, sizeof desk_dir);
+        file_top = 0;
         collect_files();
         mouse_arm();
         rows_summary(line, sizeof line);
@@ -2280,16 +2308,77 @@ static void feed_scroll(int step) {
     }
 }
 
+static void nav_push(void) {
+    if (panel == P_NONE) {
+        return;
+    }
+    if (nav_n == NAV_MAX) {
+        for (int i = 1; i < NAV_MAX; i++) {
+            nav_stack[i - 1] = nav_stack[i];
+        }
+        nav_n--;
+    }
+    struct nav_step *e = &nav_stack[nav_n++];
+    e->panel = panel;
+    s_copy(e->dir, desk_dir, sizeof e->dir);
+    e->focus = pfocus;
+    e->top = file_top;
+    e->filter = feed_filter;
+}
+
+static void nav_back(void) {
+    if (nav_n == 0) {
+        show_home();
+        return;
+    }
+    struct nav_step e = nav_stack[--nav_n];
+    view = VIEW_HOME;
+    if (e.panel == P_FILES) {
+        char line[512];
+        s_copy(desk_dir, e.dir, sizeof desk_dir);
+        collect_files();
+        file_top = e.top < file_rows ? e.top : 0;
+        if (panel != P_FILES) {
+            open_panel(P_FILES);
+        }
+        pfocus = e.focus;
+        redraw_all();
+        rows_summary(line, sizeof line);
+        console_puts("back: ");
+        console_puts(desk_dir);
+        console_puts(" ls: ");
+        console_puts(line);
+        console_putc('\n');
+    } else if (e.panel == P_FEED) {
+        open_feed(e.filter);
+        console_puts("back: feed\n");
+    } else {
+        open_panel(e.panel);
+        console_puts("back: panel\n");
+    }
+}
+
 static void panel_act(int k) {
     int act = it_act[k];
     int arg = it_arg[k];
     if (act == A_CLOSE) {
-        show_home();
+        if (portrait) {
+            nav_back(); /* the phone bar's «< Назад» */
+        } else {
+            show_home();
+        }
+        return;
+    }
+    if (act == A_BACK) {
+        nav_back();
         return;
     }
     if (act == A_ROW) {
         show_file(arg);
         return;
+    }
+    if (act == A_CHIP && arg != feed_filter) {
+        nav_push();
     }
     if (act == A_CHIP) {
         feed_filter = arg;
@@ -2312,6 +2401,7 @@ static void panel_act(int k) {
         return;
     }
     if (act == A_TO_FEED) {
+        nav_push();
         open_feed(feed_filter_for_panel(panel));
         mouse_arm();
         return;
@@ -2691,7 +2781,7 @@ static void bar_key(char ch) {
     } else if (ch == '\b') {
         if (bar_len == 0) {
             if (panel != P_NONE) {
-                show_home(); /* Back on a TV remote */
+                nav_back(); /* Back (TV remote, phone pad): one step */
             }
             return;
         }
@@ -2841,7 +2931,11 @@ void desktop_mouse(int x, int y, int left) {
     }
     if (panel != P_NONE && in_rect(x, y, PANEL_X, PANEL_Y, PANEL_W, PANEL_H)) {
         if (in_rect(x, y, CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H)) {
-            show_home();
+            if (portrait) {
+                nav_back();
+            } else {
+                show_home();
+            }
             return;
         }
         panel_click(x, y);
@@ -2857,7 +2951,7 @@ void desktop_mouse(int x, int y, int left) {
 
 void desktop_key(char ch) {
     if (view == VIEW_VIEWER && (ch == DESK_ESC || ch == '\b')) {
-        viewer_back = 1; /* Back from a viewer without a mouse */
+        viewer_back = ch == DESK_ESC ? 2 : 1; /* Esc closes, Back steps back */
         return;
     }
     if (view == VIEW_HOME) {

@@ -157,6 +157,10 @@ test("journal records actions; Лента re-runs a command, confirms rm, filter
     await key(guest, "up"); // the title row: «В ленту» / X
     await key(guest, "ret");
     await next(guest, "feed: Пакеты", pk);
+    // Back is one step: from that Лента back to the Пакеты panel, not home.
+    const backs = countOf(guest.serial, "back: panel");
+    await key(guest, "backspace");
+    await next(guest, "back: panel", backs);
     // The journal survives: it is a file in /home.
     await key(guest, "esc");
     await typeLine(guest, "cat /home/.journal");
