@@ -26,8 +26,18 @@ export function pixel(
   return [image.pixels[index]!, image.pixels[index + 1]!, image.pixels[index + 2]!];
 }
 
+/** Push the pointer into the top-left corner (the guest clamps it at 0,0). */
+export async function homePointer(guest: Guest): Promise<void> {
+  for (let i = 0; i < 17; i++) {
+    await guest.monitor("mouse_move -120 -120");
+    await delay(15);
+  }
+  await delay(300);
+}
+
 /** Move the pointer to (x, y) in steps and press the left button. */
 export async function click(guest: Guest, x: number, y: number): Promise<void> {
+  await homePointer(guest);
   let left = x;
   let top = y;
   while (left > 0 || top > 0) {

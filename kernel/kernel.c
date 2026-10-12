@@ -352,8 +352,12 @@ static void mouse_packet(unsigned char data) {
         return;
     }
     mouse_cycle = 0;
-    int dx = (int)(signed char)mouse_bytes[1];
-    int dy = (int)(signed char)mouse_bytes[2];
+    /* 9-bit deltas: the sign bits live in byte 0 (bit 4 = X, bit 5 = Y). */
+    int dx = (int)mouse_bytes[1] - ((mouse_bytes[0] & 0x10) ? 256 : 0);
+    int dy = (int)mouse_bytes[2] - ((mouse_bytes[0] & 0x20) ? 256 : 0);
+    if (mouse_bytes[0] & 0xc0) {
+        dx = dy = 0; /* overflow: the deltas are garbage */
+    }
     mouse_x += dx;
     mouse_y -= dy;
     if (mouse_x < 0) {
@@ -658,7 +662,16 @@ void guest_yield(void) {
     link_poll();
 }
 
+/* Arms the PS/2 mouse once, on the first desktop screen. Later calls are
+ * no-ops: re-arming used to reset the pointer to 0,0 (top-left) and drop
+ * buffered keystrokes on every button press or panel switch. */
+static int mouse_armed;
+
 void mouse_arm(void) {
+    if (mouse_armed) {
+        return;
+    }
+    mouse_armed = 1;
     mouse_init();
     for (int i = 0; i < 16; i++) {
         if ((inb(0x64) & 0x01) == 0) {

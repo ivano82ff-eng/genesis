@@ -131,9 +131,15 @@ test("journal records actions; Лента re-runs a command, confirms rm, filter
     await guest.waitForSerial("feed: cancel", DEFAULT_TIMEOUT_MS);
     // Walk left to «echo first» and run it again.
     const deadline = Date.now() + 30_000;
-    while (!guest.serial.trimEnd().endsWith("feed: at echo first") && !/feed: at echo first\n[^\n]*$/.test(guest.serial)) {
+    // Judge by the latest "feed: at" line: the clock prints "time ..." every second,
+    // so the focus line is not always the last one in the log.
+    const lastAt = () => [...guest.serial.matchAll(/feed: at ([^\n]*)\n/g)].pop()?.[1];
+    while (lastAt() !== "echo first") {
       if (Date.now() > deadline) throw new Error(guest.serial.slice(-800));
+      const seen = countOf(guest.serial, "feed: at ");
       await key(guest, "left");
+      const wait = Date.now() + 5_000;
+      while (countOf(guest.serial, "feed: at ") === seen && Date.now() < wait) await delay(50);
     }
     const echoes = countOf(guest.serial, "\nfirst\n");
     await key(guest, "ret");
