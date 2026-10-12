@@ -1807,7 +1807,7 @@ static void draw_panel_body(void) {
         n = s_cat(s, n, " из ", sizeof s);
         u_cat(s, n, (unsigned int)lines, sizeof s);
         ui_text(x0 + 2 * bw + P(24), SCROLL_Y + (BTN_H - t1) / 2, s, MUTED, 1);
-        if (inner_w > P(700)) {
+        if (inner_w - 2 * bw - P(24) - 22 * cw >= 68 * cw) {
             ui_text(x0 + 2 * bw + P(24) + 22 * cw, SCROLL_Y + (BTN_H - t1) / 2,
                     "Tab/стрелки: ссылки, Enter: открыть, Backspace: назад, Esc: закрыть", MUTED, 1);
         }
